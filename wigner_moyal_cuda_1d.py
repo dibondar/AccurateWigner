@@ -272,7 +272,7 @@ class WignerMoyalCUDA1D:
         ##########################################################################################
 
         # This array is used for expectation value calculation
-        self._weighted = gpuarray.zeros(self.wignerfunction.shape, np.float64)
+        self.weighted = gpuarray.zeros(self.wignerfunction.shape, np.float64)
 
         # hash table of cuda compiled functions that calculate an average of specified observable
         self._compiled_observable = dict()
@@ -327,9 +327,9 @@ class WignerMoyalCUDA1D:
             ).get_function("Kernel")
 
         # Execute underlying function
-        func(self.wignerfunction, self._weighted, self.t, **self.wigner_mapper_params)
+        func(self.wignerfunction, self.weighted, self.t, **self.wigner_mapper_params)
 
-        return gpuarray.sum(self._weighted).get() * self.dXdP
+        return gpuarray.sum(self.weighted).get() * self.dXdP
 
     def get_purity(self):
         """
@@ -372,13 +372,11 @@ class WignerMoyalCUDA1D:
         """
         if isinstance(new_wigner_func, (np.ndarray, gpuarray.GPUArray)):
             # perform the consistency checks
-            assert new_wigner_func.shape == (self.P.size, self.X.size), \
+            assert new_wigner_func.shape == self.wignerfunction.shape, \
                 "The grid sizes does not match with the Wigner function"
 
-            assert new_wigner_func.dtype == np.float, "Supplied Wigner function must be real"
-
             # copy wigner function
-            self.wignerfunction[:] = new_wigner_func.astype(np.complex128, copy=False)
+            self.wignerfunction[:] = new_wigner_func.astype(np.complex128)
 
         elif isinstance(new_wigner_func, FunctionType):
             # user supplied the function which will return the Wigner function
@@ -392,14 +390,17 @@ class WignerMoyalCUDA1D:
             ).get_function("Kernel")
             init_wigner(self.wignerfunction, **self.wigner_mapper_params)
 
-        elif isinstance(new_wigner_func, float):
+        elif isinstance(new_wigner_func, (float, complex)):
             # user specified a constant
-            self.wignerfunction.fill(np.complex64(new_wigner_func))
+            self.wignerfunction.fill(np.complex128(new_wigner_func))
         else:
             raise NotImplementedError("new_wigner_func must be either function or numpy.array")
 
         # normalize
         self.wignerfunction /= gpuarray.sum(self.wignerfunction).get() * self.dXdP
+
+        # Find the underlying density matrix
+        self.wigner2rho()
 
         return self
 
@@ -720,9 +721,9 @@ class WignerMoyalCUDA1D:
 
     weighted_func_cuda_code = """
     // CUDA code to calculate
-    //      _weighted = W(X, P, t) * func(X, P, t).
+    //      weighted = W(X, P, t) * func(X, P, t).
     // This is used in self.get_average
-    // _weighted.sum()*dX*dP is the average of func(X, P, t) over the Wigner function
+    // weighted.sum()*dX*dP is the average of func(X, P, t) over the Wigner function
     #include<pycuda-complex.hpp>
     #include<math.h>
     #define _USE_MATH_DEFINES
@@ -850,8 +851,6 @@ if __name__ == '__main__':
             self.quant_sys.set_wignerfunction(
                 "exp(-sigma * pow(X - x0, 2) - (1.0 / sigma) * pow(P - p0, 2))"
             )
-
-            self.quant_sys.wigner2rho()
 
         def empty_frame(self):
             """
