@@ -149,10 +149,19 @@ class WignerMoyalCUDA1D:
         kwargs.update(
             dX=self.dX,
             dP=self.dP,
+
             dXX=self.dXX,
             dXX_prime=self.dXX_prime,
+
             dPP=self.dPP,
-            dPP_prime=self.dPP_prime
+            dPP_prime=self.dPP_prime,
+
+            # These constants are useful for constructing the absorbing boundaries
+            XX_max=self.XX.max(),
+            XX_prime_max=self.XX_prime.max(),
+
+            PP_max=self.PP.max(),
+            PP_prime_max=self.PP_prime.max()
         )
 
         self.cuda_consts = ""
@@ -336,7 +345,7 @@ class WignerMoyalCUDA1D:
         Return the purity of the current Wigner function, 2*np.pi*np.sum(W**2)*dXdP
         :return: float
         """
-        return 2. * np.pi * gpuarray.dot(self.wignerfunction, self.wignerfunction).get() * self.dXdP
+        return 2. * np.pi * gpuarray.dot(self.wignerfunction, self.wignerfunction).get().real * self.dXdP
 
     def get_sigma_x_sigma_p(self):
         """

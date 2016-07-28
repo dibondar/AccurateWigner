@@ -172,8 +172,8 @@ class WignerBlochCUDA1D(WignerMoyalCUDA1D):
         # Set the infinite temperature initial state
         self.set_wignerfunction(1. / np.prod(self.wignerfunction.shape))
 
-        # Allocate memory for extra copy of the Wigner function
-        previous_wignerfunction = self.wignerfunction.copy()
+        # Allocate memory for extra copy of the density matrix
+        previous_rho = self.rho.copy()
 
         while current_purity < (1. - abs_tol_purity) and dbeta > 1e-11:
             # advance by one time step
@@ -196,7 +196,7 @@ class WignerBlochCUDA1D(WignerMoyalCUDA1D):
                 previous_purity = current_purity
 
                 # make a copy of the current state
-                gpuarray._memcpy_discontig(previous_wignerfunction, self.wignerfunction)
+                gpuarray._memcpy_discontig(previous_rho, self.rho)
 
                 print(
                     "Current energy: %.5f; purity: 1 - %.2e; dbeta: %.2e"
@@ -205,7 +205,7 @@ class WignerBlochCUDA1D(WignerMoyalCUDA1D):
             except AssertionError:
                 # the current state is unphysical,
                 # revert the propagation
-                gpuarray._memcpy_discontig(self.wignerfunction, previous_wignerfunction)
+                gpuarray._memcpy_discontig(self.rho, previous_rho)
 
                 # and half the step size
                 dbeta *= 0.5
@@ -213,6 +213,8 @@ class WignerBlochCUDA1D(WignerMoyalCUDA1D):
                 # restore the original settings
                 current_energy = previous_energy
                 current_purity = previous_purity
+
+        self.rho2wigner()
 
         return self.wignerfunction
 
@@ -223,30 +225,19 @@ class WignerBlochCUDA1D(WignerMoyalCUDA1D):
         :param dbeta: (float) the inverse temperature step size
         :return:
         """
-        # the p x -> theta x transform
-        cufft.fft_Z2Z(self.wignerfunction, self.wignerfunction, self.plan_Z2Z_ax0)
+        self.bloch_expV(self.rho, dbeta, **self.rho_mapper_params)
 
-        self.bloch_expV(self.wignerfunction, dbeta, **self.wigner_mapper_params)
+        cufft.fft_Z2Z(self.rho, self.rho, self.plan_Z2Z_ax0)
+        cufft.fft_Z2Z(self.rho, self.rho, self.plan_Z2Z_ax1)
 
-        # the theta x -> p x  transform
-        cufft.ifft_Z2Z(self.wignerfunction, self.wignerfunction, self.plan_Z2Z_ax0)
-        # the p x  ->  p lambda transform
-        cufft.fft_Z2Z(self.wignerfunction, self.wignerfunction, self.plan_Z2Z_ax1)
+        self.bloch_expK(self.rho, dbeta, **self.rho_mapper_params)
 
-        self.bloch_expK(self.wignerfunction, dbeta, **self.wigner_mapper_params)
+        cufft.ifft_Z2Z(self.rho, self.rho, self.plan_Z2Z_ax0)
+        cufft.ifft_Z2Z(self.rho, self.rho, self.plan_Z2Z_ax1)
 
-        # the p lambda  ->  p x transform
-        cufft.ifft_Z2Z(self.wignerfunction, self.wignerfunction, self.plan_Z2Z_ax1)
-        # the p x -> theta x transform
-        cufft.fft_Z2Z(self.wignerfunction, self.wignerfunction, self.plan_Z2Z_ax0)
+        self.bloch_expV(self.rho, dbeta, **self.rho_mapper_params)
 
-        self.bloch_expV(self.wignerfunction, dbeta, **self.wigner_mapper_params)
-
-        # the theta x -> p x  transform
-        cufft.ifft_Z2Z(self.wignerfunction, self.wignerfunction, self.plan_Z2Z_ax0)
-
-        # normalize
-        self.wignerfunction /= gpuarray.sum(self.wignerfunction).get() * self.dXdP
+        self.normalize_rho_wigner()
 
     bloch_cuda_source = """
     /////////////////////////////////////////////////////////////////////////////
@@ -288,11 +279,11 @@ class WignerBlochCUDA1D(WignerMoyalCUDA1D):
         const size_t j = threadIdx.x + blockDim.x * blockIdx.x;
         const size_t indexTotal = j + i * X_gridDIM;
 
-        const double Lambda = M_SQRT2 * dPP * ((j + X_gridDIM / 2) % X_gridDIM - 0.5 * X_gridDIM);
-        const double P = dP * (i - 0.5 * P_gridDIM);
+        const double PP = dPP * ((j + X_gridDIM / 2) % X_gridDIM - 0.5 * X_gridDIM);
+        const double PP_prime = dPP_prime * ((i + P_gridDIM / 2) % P_gridDIM - 0.5 * P_gridDIM);
 
         const double phase = -0.5 * dbeta * (
-            K(P + 0.5 * Lambda, t_initial) + K(P - 0.5 * Lambda, t_initial) - K_min
+            K(PP, t_initial) + K(PP_prime, t_initial) - K_min
         );
 
         W[indexTotal] *= exp(phase) * ({abs_boundary_p});
@@ -311,11 +302,11 @@ class WignerBlochCUDA1D(WignerMoyalCUDA1D):
         const size_t j = threadIdx.x + blockDim.x * blockIdx.x;
         const size_t indexTotal = j + i * X_gridDIM;
 
-        const double X = dX * (j - 0.5 * X_gridDIM);
-        const double Theta = M_SQRT2 * dXX_prime * ((i + P_gridDIM / 2) % P_gridDIM - 0.5 * P_gridDIM);
+        const double XX = dXX * (j - 0.5 * X_gridDIM);
+        const double XX_prime = dXX_prime * (i - 0.5 * P_gridDIM);
 
         const double phase = -0.25 * dbeta * (
-            V(X + 0.5 * Theta, t_initial) + V(X - 0.5 * Theta, t_initial) - V_min
+            V(XX, t_initial) + V(XX_prime, t_initial) - V_min
         );
 
         W[indexTotal] *= exp(phase) * ({abs_boundary_x});
@@ -352,10 +343,10 @@ class WignerBlochCUDA1D(WignerMoyalCUDA1D):
         const size_t j = threadIdx.x + blockDim.x * blockIdx.x;
         const size_t indexTotal = j + i * X_gridDIM;
 
-        const double X = dX * (j - 0.5 * X_gridDIM);
-        const double Theta = M_SQRT2 * dXX_prime * ((i + P_gridDIM / 2) % P_gridDIM - 0.5 * P_gridDIM);
+        const double XX = dXX * (j - 0.5 * X_gridDIM);
+        const double XX_prime = dXX_prime * (i - 0.5 * P_gridDIM);
 
-        tmp[indexTotal] = V(X + 0.5 * Theta, t_initial) + V(X - 0.5 * Theta, t_initial);
+        tmp[indexTotal] = V(XX, t_initial) + V(XX_prime, t_initial);
     }}
 
     __global__ void fill_K(double *tmp)
@@ -364,10 +355,10 @@ class WignerBlochCUDA1D(WignerMoyalCUDA1D):
         const size_t j = threadIdx.x + blockDim.x * blockIdx.x;
         const size_t indexTotal = j + i * X_gridDIM;
 
-        const double Lambda = M_SQRT2 * dPP * ((j + X_gridDIM / 2) % X_gridDIM - 0.5 * X_gridDIM);
-        const double P = dP * (i - 0.5 * P_gridDIM);
+        const double PP = dPP * ((j + X_gridDIM / 2) % X_gridDIM - 0.5 * X_gridDIM);
+        const double PP_prime = dPP_prime * ((i + P_gridDIM / 2) % P_gridDIM - 0.5 * P_gridDIM);
 
-        tmp[indexTotal] = K(P + 0.5 * Lambda, t_initial) + K(P - 0.5 * Lambda, t_initial);
+        tmp[indexTotal] = K(PP, t_initial) + K(PP_prime, t_initial);
     }}
     """
 
