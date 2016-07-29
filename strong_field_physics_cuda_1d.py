@@ -25,13 +25,13 @@ sys_params = dict(
     t=0.,
     dt=0.01,
 
-    X_gridDIM=4*1024,
+    X_gridDIM=2*1024,
 
     # the lattice constant is 2 * X_amplitude
     X_amplitude=150.,
 
     P_gridDIM=512,
-    P_amplitude=10.,
+    P_amplitude=20.,
 
     # Temperature in atomic units
     #kT=0.001,
@@ -157,8 +157,8 @@ class VisualizeDynamicsPhaseSpace:
             norm=WignerNormalize(vmin=-0.001, vmax=0.001)
         )
 
-        ax.set_xlim([-40, 40])
-        ax.set_ylim([-5, 5])
+        #ax.set_xlim([-40, 40])
+        #ax.set_ylim([-5, 5])
 
         self.fig.colorbar(self.img)
 
@@ -199,8 +199,19 @@ class VisualizeDynamicsPhaseSpace:
         print "XX max: ", self.quant_sys.XX.max()
         print "XX prime max: ", self.quant_sys.XX_prime.max()
 
-        # set the Gibbs state as initial condition
-        self.quant_sys.get_ground_state(abs_tol_purity=1e-10)
+        import pickle
+
+        try:
+            with open("ground_state_rho.pickle", "rb") as ground_state_file:
+                self.quant_sys.rho[:] = pickle.load(ground_state_file)
+
+            print("!!!!!!!!!!!!!!!! Loaded ground state !!!!!!!!!!!")
+        except Exception:
+            # set the Gibbs state as initial condition
+            self.quant_sys.get_ground_state(abs_tol_purity=1e-10)
+
+            with open("ground_state_rho.pickle", "wb") as ground_state_file:
+                pickle.dump(self.quant_sys.rho.get(), ground_state_file)
 
         # use the wigner function as the initial condition
         #self.quant_sys.wigner2rho()
@@ -211,7 +222,7 @@ class VisualizeDynamicsPhaseSpace:
 
         assert r is not self.quant_sys.wigner_initial
 
-        print("Purity: 1 - %.1e" % (1 - self.quant_sys.get_purity()))
+        #print("Purity: 1 - %.1e" % (1 - self.quant_sys.get_purity()))
 
     def empty_frame(self):
         """

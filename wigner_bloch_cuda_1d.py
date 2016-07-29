@@ -286,7 +286,7 @@ class WignerBlochCUDA1D(WignerMoyalCUDA1D):
             K(PP, t_initial) + K(PP_prime, t_initial) - K_min
         );
 
-        W[indexTotal] *= exp(phase) * ({abs_boundary_p});
+        W[indexTotal] *= exp(phase); // * ({abs_boundary_p});
     }}
 
     ////////////////////////////////////////////////////////////////////////////
@@ -309,7 +309,7 @@ class WignerBlochCUDA1D(WignerMoyalCUDA1D):
             V(XX, t_initial) + V(XX_prime, t_initial) - V_min
         );
 
-        W[indexTotal] *= exp(phase) * ({abs_boundary_x});
+        W[indexTotal] *= exp(phase); // * ({abs_boundary_x});
     }}
     """
 

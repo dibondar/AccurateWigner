@@ -251,6 +251,9 @@ class WignerMoyalCUDA1D:
         self.expV = wigner_cuda_compiled.get_function("expV")
         self.expK = wigner_cuda_compiled.get_function("expK")
 
+        self.blackmanX = wigner_cuda_compiled.get_function("blackmanX")
+        self.blackmanY = wigner_cuda_compiled.get_function("blackmanY")
+
         ##########################################################################################
         #
         # Allocate memory for the wigner function in the theta x and p lambda representations
@@ -447,23 +450,20 @@ class WignerMoyalCUDA1D:
         cufft.ifft_Z2Z(self.rho, self.rho, self.plan_Z2Z_ax1)
         self.phase_shearX(self.rho, **self.rho_mapper_params)
         cufft.fft_Z2Z(self.rho, self.rho, self.plan_Z2Z_ax1)
-        self.rho /= self.rho.shape[1]
 
         # Shear Y
         cufft.ifft_Z2Z(self.rho, self.rho, self.plan_Z2Z_ax0)
         self.phase_shearY(self.rho, **self.rho_mapper_params)
         cufft.fft_Z2Z(self.rho, self.rho, self.plan_Z2Z_ax0)
-        self.rho /= self.rho.shape[0]
 
         # Shear X
         cufft.ifft_Z2Z(self.rho, self.rho, self.plan_Z2Z_ax1)
         self.phase_shearX(self.rho, **self.rho_mapper_params)
         cufft.fft_Z2Z(self.rho, self.rho, self.plan_Z2Z_ax1)
-        self.rho /= self.rho.shape[1]
 
         return self.rho
 
-    def rho2wigner(self):
+    def rho2wigner_(self):
         """
         Transform the density matrix saved in self.rho into the unormalized Wigner function
         :return: self.wignerfunction
@@ -476,19 +476,16 @@ class WignerMoyalCUDA1D:
         cufft.fft_Z2Z(self.wignerfunction, self.wignerfunction, self.plan_Z2Z_ax1)
         self.phase_shearX(self.wignerfunction, **self.wigner_mapper_params)
         cufft.ifft_Z2Z(self.wignerfunction, self.wignerfunction, self.plan_Z2Z_ax1)
-        self.wignerfunction /= self.wignerfunction.shape[1]
 
         # Shear Y
         cufft.fft_Z2Z(self.wignerfunction, self.wignerfunction, self.plan_Z2Z_ax0)
         self.phase_shearY(self.wignerfunction, **self.wigner_mapper_params)
         cufft.ifft_Z2Z(self.wignerfunction, self.wignerfunction, self.plan_Z2Z_ax0)
-        self.wignerfunction /= self.wignerfunction.shape[0]
 
         # Shear X
         cufft.fft_Z2Z(self.wignerfunction, self.wignerfunction, self.plan_Z2Z_ax1)
         self.phase_shearX(self.wignerfunction, **self.wigner_mapper_params)
         cufft.ifft_Z2Z(self.wignerfunction, self.wignerfunction, self.plan_Z2Z_ax1)
-        self.wignerfunction /= self.wignerfunction.shape[1]
 
         # Step 2: FFt the Blokhintsev function
         self.sign_flip(self.wignerfunction, **self.wigner_mapper_params)
@@ -496,6 +493,44 @@ class WignerMoyalCUDA1D:
         self.sign_flip(self.wignerfunction, **self.wigner_mapper_params)
 
         return self.wignerfunction
+
+    def rho2wigner_blackman(self):
+        """
+        Transform the density matrix saved in self.rho into the unormalized Wigner function
+        :return: self.wignerfunction
+        """
+        # Make a copy of the density matrix
+        gpuarray._memcpy_discontig(self.wignerfunction, self.rho)
+
+        # Step 1: Rotate by +45 degrees
+        # Shear X
+        self.blackmanX(self.wignerfunction, **self.wigner_mapper_params)
+        cufft.fft_Z2Z(self.wignerfunction, self.wignerfunction, self.plan_Z2Z_ax1)
+        self.phase_shearX(self.wignerfunction, **self.wigner_mapper_params)
+        cufft.ifft_Z2Z(self.wignerfunction, self.wignerfunction, self.plan_Z2Z_ax1)
+
+        # Shear Y
+        self.blackmanY(self.wignerfunction, **self.wigner_mapper_params)
+        cufft.fft_Z2Z(self.wignerfunction, self.wignerfunction, self.plan_Z2Z_ax0)
+        self.phase_shearY(self.wignerfunction, **self.wigner_mapper_params)
+        cufft.ifft_Z2Z(self.wignerfunction, self.wignerfunction, self.plan_Z2Z_ax0)
+
+        # Shear X
+        self.blackmanX(self.wignerfunction, **self.wigner_mapper_params)
+        cufft.fft_Z2Z(self.wignerfunction, self.wignerfunction, self.plan_Z2Z_ax1)
+        self.phase_shearX(self.wignerfunction, **self.wigner_mapper_params)
+        cufft.ifft_Z2Z(self.wignerfunction, self.wignerfunction, self.plan_Z2Z_ax1)
+
+        # Step 2: FFt the Blokhintsev function
+        self.blackmanY(self.wignerfunction, **self.wigner_mapper_params)
+        self.sign_flip(self.wignerfunction, **self.wigner_mapper_params)
+        cufft.ifft_Z2Z(self.wignerfunction, self.wignerfunction, self.plan_Z2Z_ax0)
+        self.sign_flip(self.wignerfunction, **self.wigner_mapper_params)
+
+        return self.wignerfunction
+
+    # Which Wigner transform to use
+    rho2wigner = rho2wigner_
 
     def single_step_propagation(self):
         """
@@ -606,7 +641,7 @@ class WignerMoyalCUDA1D:
         const double a = tan(M_PI / 8.);
         const double phase = -a * PP * XX_prime;
 
-        rho[indexTotal] *= cuda_complex(cos(phase), sin(phase));
+        rho[indexTotal] *= cuda_complex(cos(phase), sin(phase)) / double(X_gridDIM);
 
     }}
 
@@ -623,7 +658,35 @@ class WignerMoyalCUDA1D:
         const double b = -sin(M_PI / 4.);
         const double phase = -b * PP_prime * XX;
 
-        rho[indexTotal] *= cuda_complex(cos(phase), sin(phase));
+        rho[indexTotal] *= cuda_complex(cos(phase), sin(phase)) / double(P_gridDIM);
+    }}
+
+    ////////////////////////////////////////////////////////////////////////////
+    //
+    //  Blackman filters
+    //
+    ////////////////////////////////////////////////////////////////////////////
+
+    __global__ void blackmanX(cuda_complex *rho)
+    {{
+        const size_t i = blockIdx.y;
+        const size_t j = threadIdx.x + blockDim.x * blockIdx.x;
+        const size_t indexTotal = j + i * X_gridDIM;
+
+        const double Cj = j * 2.0 * M_PI / (X_gridDIM - 1.);
+
+        rho[indexTotal] *= 0.42 - 0.5 * cos(Cj) + 0.08 * cos(2.0 * Cj);
+    }}
+
+    __global__ void blackmanY(cuda_complex *rho)
+    {{
+        const size_t i = blockIdx.y;
+        const size_t j = threadIdx.x + blockDim.x * blockIdx.x;
+        const size_t indexTotal = j + i * X_gridDIM;
+
+        const double Ci = i * 2.0 * M_PI / (P_gridDIM - 1.);
+
+        rho[indexTotal] *= 0.42 - 0.5 * cos(Ci) + 0.08 * cos(2.0 * Ci);
     }}
 
     ////////////////////////////////////////////////////////////////////////////
