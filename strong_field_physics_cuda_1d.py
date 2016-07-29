@@ -50,10 +50,10 @@ sys_params = dict(
     Ip=0.59,
 
     functions="""
-    // # The laser field (the field will be on for 7 periods of laser field)
+    // # The laser field (the field will be on for 8 periods of laser field)
     __device__ double E(double t)
     {{
-        return -F * sin(omega * t) * pow(sin(omega * t / 14.), 2);
+        return -F * sin(omega * t) * pow(sin(omega * t / 16.), 2);
     }}
     """,
 
