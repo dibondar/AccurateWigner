@@ -741,7 +741,7 @@ class WignerMoyalCUDA1D:
         const double PP = dPP * ((j + X_gridDIM / 2) % X_gridDIM - 0.5 * X_gridDIM);
         const double PP_prime = dPP_prime * ((i + P_gridDIM / 2) % P_gridDIM - 0.5 * P_gridDIM);
 
-        const double phase = -dt * (K(PP, t) - K(PP_prime, t));
+        const double phase = -dt * (K(PP, t + 0.5 * dt) - K(PP_prime, t + 0.5 * dt));
 
         rho[indexTotal] *= cuda_complex(cos(phase), sin(phase)) * ({abs_boundary_p});
     }}
