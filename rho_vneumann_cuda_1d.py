@@ -134,6 +134,9 @@ class RhoVNeumannCUDA1D:
 
         self.dXdP_wigner = self.dX_wigner * self.dP_wigner
 
+        self.X_wigner = self.X_wigner[np.newaxis, :]
+        self.P_wigner = self.P_wigner[:, np.newaxis]
+
         ##########################################################################################
         #
         # Save CUDA constants
@@ -375,7 +378,7 @@ class RhoVNeumannCUDA1D:
 
         return self
 
-    def get_wigner(self):
+    def get_wignerfunction(self):
         """
         Transform the density matrix saved in self.rho into the unormalized Wigner function
         :return: self.wignerfunction
@@ -949,7 +952,7 @@ if __name__ == '__main__':
             :return: image objects
             """
             # propagate the wave function and then get the Wigner function
-            W = self.quant_sys.propagate(10).get_wigner().get()
+            W = self.quant_sys.propagate(10).get_wignerfunction().get()
 
             self.img.set_array(W.real)
 
