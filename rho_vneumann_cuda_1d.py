@@ -1,6 +1,8 @@
 import pycuda.gpuarray as gpuarray
 import pycuda.autoinit
 from pycuda.compiler import SourceModule
+from pycuda.reduction import ReductionKernel
+from pycuda.tools import dtype_to_ctype
 import numpy as np
 from fractions import gcd
 from types import MethodType, FunctionType
@@ -10,15 +12,12 @@ import skcuda.linalg as cu_linalg
 cu_linalg.init()
 
 
-class PaddedWignerCUDA1D:
+class RhoVNeumannCUDA1D:
     """
-    The second-order split-operator propagator for the Wigner function W(x, p, t)
+    The second-order split-operator propagator for the von Neumann equation for the denisty matrix rho(x,x',t)
     with the time-dependent Hamiltonian H = K(p, t) + V(x, t) using CUDA.
 
-    The Wigner function is obtained by padded Wigner transforming the (rectangular) density matrix,
-    which is propagated via the von Neumann equation by assuming the periodic boundaries.
-
-    This implementation stores the Wigner function as a 2D real gpu array.
+    The Wigner function is obtained by padded Wigner transforming the (rectangular) density matrix.
     """
     def __init__(self, **kwargs):
         """
@@ -111,16 +110,22 @@ class PaddedWignerCUDA1D:
         self.dP = self.P[1] - self.P[0]
 
         # Padding for Wigner function (from one-side)
-        self.wigner_padding = int(np.ceil(
-            0.5 * (np.sqrt(2.) - 1.) * self.X.size
-        ))
+
+        # NOTE: the minimal necessary padding to perform the Wigner transform is
+        #
+        #   self.wigner_padding = int(np.ceil(0.5 * (np.sqrt(2.) - 1.) * self.X.size))
+        #
+        #   However, it is advisible to use for the efficiency of FFT
+        self.wigner_padding = self.X.size // 2
 
         # number of points for Wigner function
         self.XX_gridDIM = self.X.size + 2 * self.wigner_padding
 
+        # X Wigner grid
         self.X_wigner = self.dX / np.sqrt(2.) * (np.arange(self.XX_gridDIM) - self.XX_gridDIM // 2)
         self.dX_wigner = self.X_wigner[1] - self.X_wigner[0]
 
+        # P Wigner grid
         PP = np.fft.fftshift(np.fft.fftfreq(self.XX_gridDIM, self.dX / (2. * np.pi)))
         self.dPP = PP[1] - PP[0]
 
@@ -265,22 +270,25 @@ class PaddedWignerCUDA1D:
         self.expV = wigner_cuda_compiled.get_function("expV")
         self.expK = wigner_cuda_compiled.get_function("expK")
 
-        self.blackmanX = wigner_cuda_compiled.get_function("blackmanX")
-        self.blackmanY = wigner_cuda_compiled.get_function("blackmanY")
+        #self.blackmanX = wigner_cuda_compiled.get_function("blackmanX")
+        #self.blackmanY = wigner_cuda_compiled.get_function("blackmanY")
 
-        """
         ##########################################################################################
         #
-        #   Initialize facility for calculating expectation values of the current wave function
+        #   Initialize facility for calculating expectation values of the curent density matrix
         #   see the implementation of self.get_average
         #
         ##########################################################################################
 
         # This array is used for expectation value calculation
-        self.weighted = gpuarray.zeros(self.wavefunction.shape, np.float64)
+        self._tmp = gpuarray.empty_like(self.rho)
 
         # hash table of cuda compiled functions that calculate an average of specified observable
         self._compiled_observable = dict()
+
+        # Create the plan for FFT/iFFT
+        self.plan_Z2Z_ax0 = cufft.Plan_Z2Z_2D_Axis0(self.rho.shape)
+        self.plan_Z2Z_ax1 = cufft.Plan_Z2Z_2D_Axis1(self.rho.shape)
 
         ##########################################################################################
         #
@@ -304,6 +312,9 @@ class PaddedWignerCUDA1D:
             # List where the expectation value of the Hamiltonian will be calculated
             self.hamiltonian_average = []
 
+            # List for saving phase space time integral
+            self.wigner_time = []
+
             # Flag requesting tha the Ehrenfest theorem calculations
             self.isEhrenfest = True
 
@@ -311,7 +322,6 @@ class PaddedWignerCUDA1D:
             # Since self.diff_V and self.diff_K are not specified,
             # the Ehrenfest theorem will not be calculated
             self.isEhrenfest = False
-        """
 
         self.print_memory_info()
 
@@ -344,7 +354,7 @@ class PaddedWignerCUDA1D:
 
         elif isinstance(new_rho, FunctionType):
             # user supplied the function which will return the density matrix
-            self.rho[:] = new_rho(self, self.X[np.newaxis, :], self.X[:, np.newaxis])
+            self.rho[:] = new_rho(self, self.X[:,np.newaxis], self.X[np.newaxis,:])
 
         elif isinstance(new_rho, str):
             # user specified C code
@@ -361,7 +371,7 @@ class PaddedWignerCUDA1D:
             raise NotImplementedError("new_rho must be either function or numpy.array")
 
         # normalize
-        self.rho /= cu_linalg.trace(self.rho) * self.dX
+        self.rho /= cu_linalg.trace(self.rho).real * self.dX
 
         return self
 
@@ -370,7 +380,6 @@ class PaddedWignerCUDA1D:
         Transform the density matrix saved in self.rho into the unormalized Wigner function
         :return: self.wignerfunction
         """
-
         self.wignerfunction.fill(np.float64(0.))
 
         # Make a copy of the density matrix
@@ -379,7 +388,15 @@ class PaddedWignerCUDA1D:
             self.wigner_padding:(self.wigner_padding + self.X_gridDIM)
         ] = self.rho
 
-        # Step 1: Rotate by +45 degrees
+        ####################################################################################
+        #
+        # Step 1: Perform the 45 degree rotation of the density matrix
+        # using method from
+        #   K. G. Larkin,  M. A. Oldfield, H. Klemm, Optics Communications, 139, 99 (1997)
+        #   (http://www.sciencedirect.com/science/article/pii/S0030401897000977)
+        #
+        ####################################################################################
+
         # Shear X
         cufft.fft_Z2Z(self.wignerfunction, self.wignerfunction, self.plan_wigner_ax1)
         self.phase_shearX(self.wignerfunction, **self.wigner_mapper_params)
@@ -395,7 +412,14 @@ class PaddedWignerCUDA1D:
         self.phase_shearX(self.wignerfunction, **self.wigner_mapper_params)
         cufft.ifft_Z2Z(self.wignerfunction, self.wignerfunction, self.plan_wigner_ax1)
 
-        # Step 2: FFt the Blokhintsev function
+        ####################################################################################
+        #
+        # Step 2: Perform the FFT over the Blokhintsev function using method from
+        #
+        #   D. H. Bailey and P. N. Swarztrauber, SIAM J. Sci. Comput. 15, 1105 (1994)
+        #   (http://epubs.siam.org/doi/abs/10.1137/0915067)
+        #
+        ####################################################################################
         self.sign_flip(self.wignerfunction, **self.wigner_mapper_params)
         cufft.ifft_Z2Z(self.wignerfunction, self.wignerfunction, self.plan_wigner_ax0)
         self.sign_flip(self.wignerfunction, **self.wigner_mapper_params)
@@ -418,10 +442,10 @@ class PaddedWignerCUDA1D:
             self.single_step_propagation()
 
             # normalize
-            self.rho /= cu_linalg.trace(self.rho) * self.dX
+            self.rho /= cu_linalg.trace(self.rho).real * self.dX
 
             # calculate the Ehrenfest theorems
-            #self.get_Ehrenfest(self.t)
+            self.get_Ehrenfest(self.t)
 
         return self
 
@@ -442,6 +466,126 @@ class PaddedWignerCUDA1D:
         self.expV(self.rho, self.t, **self.rho_mapper_params)
 
         return self.rho
+
+    def get_Ehrenfest(self, t):
+        """
+        Calculate observables entering the Ehrenfest theorems at time
+        :param t: current time
+        :return: coordinate and momentum densities, if the Ehrenfest theorems were calculated; otherwise, return None
+        """
+        if self.isEhrenfest:
+            # save the current value of <X>
+            self.X_average.append(
+                self.get_average(("X",))
+            )
+
+            # save the current value of <diff_K>
+            self.X_average_RHS.append(
+                self.get_average((None, self.diff_K))
+            )
+
+            # save the current value of <P>
+            self.P_average.append(
+                self.get_average((None, "P"))
+            )
+
+            # save the current value of <-diff_V>
+            self.P_average_RHS.append(
+                -self.get_average((self.diff_V,))
+            )
+
+            # save the current expectation value of energy
+            self.hamiltonian_average.append(
+                self.get_average((None, self.K)) + self.get_average((self.V,))
+            )
+
+    def get_observable(self, observable_str):
+        """
+        Return the compiled observable
+        :param observable_str: (str)
+        :return: float
+        """
+        # Compile the corresponding cuda functions, if it has not been done
+        try:
+            func = self._compiled_observable[observable_str]
+        except KeyError:
+            print("\n============================== Compiling [%s] ==============================\n" % observable_str)
+            func = self._compiled_observable[observable_str] = SourceModule(
+                self.apply_observable_cuda_source.format(cuda_consts=self.cuda_consts, observable=observable_str),
+            ).get_function("Kernel")
+
+        return func
+
+    def get_average(self, observable):
+        """
+        Return the expectation value of an observable.
+            observable = (coordinate obs, momentum obs, coordinate obs, momentum obs, ...)
+
+        Example 1:
+            To calculate Tr[rho F1(x) g1(p) F2(X)], we use observable = ("F1(x)", "g1(p)", "F2(X)")
+
+        Example 2:
+            To calculate Tr[rho g(p) F(X)], we use observable = (None, "g(p)", "F(X)")
+
+        :param observable: tuple of strings
+        :return: float
+        """
+
+        # Boolean flag indicated the representation
+        is_x_observable = False
+
+        # Make a copy of the density matrix
+        gpuarray._memcpy_discontig(self._tmp, self.rho)
+
+        for obs_str in observable:
+            is_x_observable = not is_x_observable
+
+            if obs_str:
+                if is_x_observable:
+                    # Apply observable in the coordinate representation
+                    self.get_observable(obs_str)(self._tmp, self.t, **self.rho_mapper_params)
+                else:
+                    # Going to the momentum representation
+                    cufft.fft_Z2Z(self._tmp, self._tmp, self.plan_Z2Z_ax1)
+
+                    # Normalize
+                    self._tmp /= self._tmp.shape[1]
+
+                    # Apply observable in the momentum representation
+                    self.get_observable(obs_str)(self._tmp, self.t, **self.rho_mapper_params)
+
+                    # Going back to the coordinate representation
+                    cufft.ifft_Z2Z(self._tmp, self._tmp, self.plan_Z2Z_ax1)
+
+        return cu_linalg.trace(self._tmp).real * self.dX
+
+    def get_purity(self):
+        """
+        Return the purity of the current density matrix Tr[rho**2]
+        :return: float
+        """
+        # If kernel calculating the purity is not present, compile it
+        try:
+            purity_kernel = self._purity_kernel
+        except AttributeError:
+            purity_kernel = self._purity_kernel = ReductionKernel(
+                np.float64, neutral="0", reduce_expr="a + b",
+                map_expr="pow(abs(R[i]), 2)", arguments="const %s *R" % dtype_to_ctype(self.rho.dtype)
+            )
+
+        return purity_kernel(self.rho).get() * self.dX**2
+
+    def get_sigma_x_sigma_p(self):
+        """
+        Return the product of standard deviation of coordinate and momentum,
+        the LHS of the Heisenberg uncertainty principle:
+            sigma_p * sigma_p >= 0.5
+        :return: float
+        """
+        return np.sqrt(
+            (self.get_average(("X * X",)) - self.get_average(("X",))**2) *
+            (self.get_average((None, "P * P")) - self.get_average((None, "P"))**2)
+        )
 
     wigner_cuda_source = """
     #include<pycuda-complex.hpp>
@@ -633,6 +777,34 @@ class PaddedWignerCUDA1D:
     }}
     """
 
+    apply_observable_cuda_source = """
+    #include<pycuda-complex.hpp>
+    #include<math.h>
+    #define _USE_MATH_DEFINES
+
+    typedef pycuda::complex<double> cuda_complex;
+
+    {cuda_consts}
+
+    ////////////////////////////////////////////////////////////////////////////
+    //
+    // CUDA code to apply the observable onto the density function
+    //
+    ////////////////////////////////////////////////////////////////////////////
+
+    __global__ void Kernel(cuda_complex *rho, double t)
+    {{
+        const size_t i = blockIdx.y;
+        const size_t j = threadIdx.x + blockDim.x * blockIdx.x;
+        const size_t indexTotal = j + i * X_gridDIM;
+
+        const double P = dP * ((j + X_gridDIM / 2) % X_gridDIM - 0.5 * X_gridDIM);
+        const double X = dX * (j - 0.5 * X_gridDIM);
+
+        rho[indexTotal] *= ({observable});
+    }}
+    """
+
 ##########################################################################################
 #
 # Example
@@ -641,7 +813,7 @@ class PaddedWignerCUDA1D:
 
 if __name__ == '__main__':
 
-    print(PaddedWignerCUDA1D.__doc__)
+    print(RhoVNeumannCUDA1D.__doc__)
 
     # load tools for creating animation
     import sys
@@ -727,7 +899,7 @@ if __name__ == '__main__':
             :return:
             """
             # Create propagator
-            self.quant_sys = RhoWignerCUDA1D(
+            self.quant_sys = RhoVNeumannCUDA1D(
                 t=0.,
                 dt=0.01,
 
@@ -735,7 +907,7 @@ if __name__ == '__main__':
                 X_amplitude=10.,
 
                 # randomized parameter
-                omega_square=np.random.uniform(2., 6.),
+                omega_square=np.random.uniform(0.01, 0.1),
 
                 # randomized parameters for initial condition
                 sigma=np.random.uniform(0.5, 4.),
@@ -746,7 +918,7 @@ if __name__ == '__main__':
                 K="0.5 * P * P",
 
                 # potential energy part of the hamiltonian
-                V="0.0", #"0.5 * omega_square * X * X",
+                V="0.5 * omega_square * X * X",
 
                 # these functions are used for evaluating the Ehrenfest theorems
                 diff_K="P",
@@ -800,7 +972,6 @@ if __name__ == '__main__':
 
     plt.show()
 
-    """
     # extract the reference to quantum system
     quant_sys = visualizer.quant_sys
 
@@ -844,4 +1015,3 @@ if __name__ == '__main__':
     plt.xlabel('time $t$ (a.u.)')
 
     plt.show()
-    """
