@@ -455,7 +455,30 @@ class SchrodingerWignerCUDA1D:
             # going back to the coordinate representation
             cufft.ifft_Z2Z(self.wavefunction, self.wavefunction, self.plan_Z2Z_psi)
 
-    def set_ground_state(self, nsteps=5000):
+    def get_energy(self):
+        """
+        Calculate the expectation value of the Hamiltonian
+        :return:
+        """
+        # Normalize the wave function as required in self.weighted_func_cuda_code
+        self.wavefunction /= cu_linalg.norm(self.wavefunction)
+
+        av_V = self.get_average(self.V)
+
+        # go to the momentum representation
+        cufft.fft_Z2Z(self.wavefunction, self.wavefunction, self.plan_Z2Z_psi)
+
+        # Normalize the wave function as required in self.weighted_func_cuda_code
+        self.wavefunction /= cu_linalg.norm(self.wavefunction)
+
+        av_K = self.get_average(self.K)
+
+        # go back to the coordinate representation
+        cufft.ifft_Z2Z(self.wavefunction, self.wavefunction, self.plan_Z2Z_psi)
+
+        return av_V + av_K
+
+    def set_ground_state(self, nsteps=10000):
         """
         Obtain the ground state wave function by the imaginary time propagation
         :param nsteps: number of the imaginary time steps to take
