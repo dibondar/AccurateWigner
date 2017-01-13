@@ -158,8 +158,8 @@ class VisualizeDynamicsPhaseSpace:
         # generate empty plot for Coulomb field
         self.coulomb_img = ax.imshow([[]], norm=WignerNormalize(vmin=-0.001, vmax=0.001), **img_params)
 
-        ax.set_xlim([-30, 30])
-        ax.set_ylim([-4, 4])
+        ax.set_xlim([-20, 20])
+        ax.set_ylim([-3, 3])
 
         self.fig.colorbar(self.coulomb_img)
 
@@ -173,10 +173,10 @@ class VisualizeDynamicsPhaseSpace:
         ax.set_title("The Wigner function for the short-range field ")
 
         # generate empty plot for short-range field
-        self.shortrange_img = ax.imshow([[]], norm=WignerNormalize(vmin=-0.00001, vmax=0.00001), **img_params)
+        self.shortrange_img = ax.imshow([[]], norm=WignerNormalize(vmin=-0.00005, vmax=0.00005), **img_params)
 
-        ax.set_xlim([-30, 30])
-        ax.set_ylim([-4, 4])
+        ax.set_xlim([-20, 20])
+        ax.set_ylim([-3, 3])
 
         self.fig.colorbar(self.shortrange_img)
 
@@ -277,13 +277,13 @@ with h5py.File('strong_field_physics.hdf5', 'w') as file_results:
         init_func=visualizer.empty_frame, blit=True, repeat=False
     )
 
-    plt.show()
+    # plt.show()
 
     # Set up formatting for the movie files
     writer = matplotlib.animation.writers['mencoder'](fps=10, metadata=dict(artist='Denys Bondar'), bitrate=-1)
 
     # Save animation into the file
-    # animation.save('strong_field_physics.mp4', writer=writer)
+    animation.save('strong_field_physics.mp4', writer=writer)
 
     # extract the reference to quantum system
     coulomb_sys = visualizer.coulomb_sys
@@ -294,80 +294,80 @@ with h5py.File('strong_field_physics.hdf5', 'w') as file_results:
     #
     #################################################################
 
-    # generate time step grid
-    dt = coulomb_sys.dt
-    times = dt * np.arange(len(coulomb_sys.X_average)) + dt
-
-    plt.subplot(131)
-    plt.title("Ehrenfest 1")
-    plt.plot(times, np.gradient(coulomb_sys.X_average, dt), 'r-', label='$d\\langle x \\rangle/dt$')
-    plt.plot(times, coulomb_sys.X_average_RHS, 'b--', label='$\\langle p + \\gamma x \\rangle$')
-
-    plt.legend(loc='upper left')
-    plt.xlabel('time $t$ (a.u.)')
-
-    plt.subplot(132)
-    plt.title("Ehrenfest 2")
-
-    plt.plot(times, np.gradient(coulomb_sys.P_average, dt), 'r-', label='$d\\langle p \\rangle/dt$')
-    plt.plot(
-        times, coulomb_sys.P_average_RHS, 'b--',
-        label='$\\langle -\\partial V/\\partial x  + \\gamma p \\rangle$'
-    )
-
-    plt.legend(loc='upper left')
-    plt.xlabel('time $t$ (a.u.)')
-
-    plt.subplot(133)
-    plt.title('Hamiltonian')
-    plt.plot(times, coulomb_sys.hamiltonian_average)
-    plt.xlabel('time $t$ (a.u.)')
-
-    plt.show()
-
-    #################################################################
+    # # generate time step grid
+    # dt = coulomb_sys.dt
+    # times = dt * np.arange(len(coulomb_sys.X_average)) + dt
     #
-    # Plot HHG spectra as FFT(<P>)
+    # plt.subplot(131)
+    # plt.title("Ehrenfest 1")
+    # plt.plot(times, np.gradient(coulomb_sys.X_average, dt), 'r-', label='$d\\langle x \\rangle/dt$')
+    # plt.plot(times, coulomb_sys.X_average_RHS, 'b--', label='$\\langle p + \\gamma x \\rangle$')
     #
-    #################################################################
-
-    N = len(coulomb_sys.P_average)
-
-    # the windowed fft of the evolution
-    # to remove the spectral leaking. For details see
-    # rhttp://docs.scipy.org/doc/scipy/reference/tutorial/fftpack.html
-    from scipy import fftpack
-    from scipy.signal import blackman
-
-    # obtain the dipole
-    J = np.array(coulomb_sys.P_average)
-
-    fft_J = fftpack.fft(blackman(N) * J)
-    #fft_J = fftpack.fft(J)
-    spectrum = np.abs(fftpack.fftshift(fft_J))**2
-    omegas = fftpack.fftshift(fftpack.fftfreq(N, coulomb_sys.dt/(2*np.pi))) / coulomb_sys.omega
-
-
-    spectrum /= spectrum.max()
-
-    plt.semilogy(omegas, spectrum)
-    plt.ylabel('spectrum FFT($\\langle p \\rangle$)')
-    plt.xlabel('frequency / $\\omega$')
-    plt.xlim([0, 100.])
-    plt.ylim([1e-20, 1.])
-
-    plt.show()
-
-    #################################################################
+    # plt.legend(loc='upper left')
+    # plt.xlabel('time $t$ (a.u.)')
     #
-    # Saving Ehrenfest theorem results into HDF5 file
+    # plt.subplot(132)
+    # plt.title("Ehrenfest 2")
     #
-    #################################################################
-
-    ehrenfest_grp = file_results.create_group("ehrenfest")
-    ehrenfest_grp["X_average"] = coulomb_sys.X_average
-    ehrenfest_grp["P_average"] = coulomb_sys.P_average
-    ehrenfest_grp["X_average_RHS"] = coulomb_sys.X_average_RHS
-    ehrenfest_grp["P_average_RHS"] = coulomb_sys.P_average_RHS
-    ehrenfest_grp["hamiltonian_average"] = coulomb_sys.hamiltonian_average
-    #ehrenfest_grp["wigner_time"] = coulomb_sys.wigner_time
+    # plt.plot(times, np.gradient(coulomb_sys.P_average, dt), 'r-', label='$d\\langle p \\rangle/dt$')
+    # plt.plot(
+    #     times, coulomb_sys.P_average_RHS, 'b--',
+    #     label='$\\langle -\\partial V/\\partial x  + \\gamma p \\rangle$'
+    # )
+    #
+    # plt.legend(loc='upper left')
+    # plt.xlabel('time $t$ (a.u.)')
+    #
+    # plt.subplot(133)
+    # plt.title('Hamiltonian')
+    # plt.plot(times, coulomb_sys.hamiltonian_average)
+    # plt.xlabel('time $t$ (a.u.)')
+    #
+    # plt.show()
+    #
+    # #################################################################
+    # #
+    # # Plot HHG spectra as FFT(<P>)
+    # #
+    # #################################################################
+    #
+    # N = len(coulomb_sys.P_average)
+    #
+    # # the windowed fft of the evolution
+    # # to remove the spectral leaking. For details see
+    # # rhttp://docs.scipy.org/doc/scipy/reference/tutorial/fftpack.html
+    # from scipy import fftpack
+    # from scipy.signal import blackman
+    #
+    # # obtain the dipole
+    # J = np.array(coulomb_sys.P_average)
+    #
+    # fft_J = fftpack.fft(blackman(N) * J)
+    # #fft_J = fftpack.fft(J)
+    # spectrum = np.abs(fftpack.fftshift(fft_J))**2
+    # omegas = fftpack.fftshift(fftpack.fftfreq(N, coulomb_sys.dt/(2*np.pi))) / coulomb_sys.omega
+    #
+    #
+    # spectrum /= spectrum.max()
+    #
+    # plt.semilogy(omegas, spectrum)
+    # plt.ylabel('spectrum FFT($\\langle p \\rangle$)')
+    # plt.xlabel('frequency / $\\omega$')
+    # plt.xlim([0, 100.])
+    # plt.ylim([1e-20, 1.])
+    #
+    # plt.show()
+    #
+    # #################################################################
+    # #
+    # # Saving Ehrenfest theorem results into HDF5 file
+    # #
+    # #################################################################
+    #
+    # ehrenfest_grp = file_results.create_group("ehrenfest")
+    # ehrenfest_grp["X_average"] = coulomb_sys.X_average
+    # ehrenfest_grp["P_average"] = coulomb_sys.P_average
+    # ehrenfest_grp["X_average_RHS"] = coulomb_sys.X_average_RHS
+    # ehrenfest_grp["P_average_RHS"] = coulomb_sys.P_average_RHS
+    # ehrenfest_grp["hamiltonian_average"] = coulomb_sys.hamiltonian_average
+    # #ehrenfest_grp["wigner_time"] = coulomb_sys.wigner_time

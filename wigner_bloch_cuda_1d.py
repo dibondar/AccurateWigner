@@ -279,8 +279,8 @@ class WignerBlochCUDA1D(WignerMoyalCUDA1D):
         const size_t j = threadIdx.x + blockDim.x * blockIdx.x;
         const size_t indexTotal = j + i * X_gridDIM;
 
-        const double PP = dPP * ((j + X_gridDIM / 2) % X_gridDIM - 0.5 * X_gridDIM);
-        const double PP_prime = dPP_prime * ((i + P_gridDIM / 2) % P_gridDIM - 0.5 * P_gridDIM);
+        const double PP = dPP * (j - 0.5 * X_gridDIM);
+        const double PP_prime = dPP_prime * (i - 0.5 * P_gridDIM);
 
         const double phase = -0.5 * dbeta * (
             K(PP, t_initial) + K(PP_prime, t_initial) - K_min
@@ -309,7 +309,10 @@ class WignerBlochCUDA1D(WignerMoyalCUDA1D):
             V(XX, t_initial) + V(XX_prime, t_initial) - V_min
         );
 
-        W[indexTotal] *= exp(phase); // * ({abs_boundary_x});
+        // sign_flip = pow(-1, i + j)
+        const double sign_flip = 1. - 2. * int((i + j) % 2);
+
+        W[indexTotal] *= sign_flip * exp(phase); // * ({abs_boundary_x});
     }}
     """
 
@@ -355,8 +358,8 @@ class WignerBlochCUDA1D(WignerMoyalCUDA1D):
         const size_t j = threadIdx.x + blockDim.x * blockIdx.x;
         const size_t indexTotal = j + i * X_gridDIM;
 
-        const double PP = dPP * ((j + X_gridDIM / 2) % X_gridDIM - 0.5 * X_gridDIM);
-        const double PP_prime = dPP_prime * ((i + P_gridDIM / 2) % P_gridDIM - 0.5 * P_gridDIM);
+        const double PP = dPP * (j - 0.5 * X_gridDIM);
+        const double PP_prime = dPP_prime * (i - 0.5 * P_gridDIM);
 
         tmp[indexTotal] = K(PP, t_initial) + K(PP_prime, t_initial);
     }}

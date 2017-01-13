@@ -122,13 +122,15 @@ class WignerMoyalCUDA1D:
         self.PP_prime = np.sqrt(2.) * self.P
         self.dPP_prime = self.PP_prime[1] - self.PP_prime[0]
 
-        self.XX_prime = np.fft.fftshift(np.fft.fftfreq(self.PP_prime.size, self.dPP_prime / (2. * np.pi)))
+        self.XX_prime = np.arange(self.P_gridDIM, dtype=np.float) - self.P_gridDIM / 2
+        self.XX_prime *= np.pi / (np.sqrt(2.) * self.P_amplitude)
         self.dXX_prime = self.XX_prime[1] - self.XX_prime[0]
 
         self.XX = np.sqrt(2.) * self.X
         self.dXX = self.XX[1] - self.XX[0]
 
-        self.PP = np.fft.fftfreq(self.XX.size, self.dXX / (2. * np.pi))
+        self.PP = np.arange(self.X_gridDIM, dtype=np.float) - self.X_gridDIM / 2
+        self.PP *= np.pi / (np.sqrt(2.) * self.X_amplitude)
         self.dPP = self.PP[1] - self.PP[0]
 
         self.P = self.P[:, np.newaxis]
@@ -246,6 +248,7 @@ class WignerMoyalCUDA1D:
 
         self.phase_shearX = wigner_cuda_compiled.get_function("phase_shearX")
         self.phase_shearY = wigner_cuda_compiled.get_function("phase_shearY")
+
         self.sign_flip = wigner_cuda_compiled.get_function("sign_flip")
 
         self.expV = wigner_cuda_compiled.get_function("expV")
@@ -421,7 +424,7 @@ class WignerMoyalCUDA1D:
         Transform the Wigner function saved in self.wignerfunction into the density matrix
         :return: self.rho
         """
-        # Make a copy of the wogner function
+        # Make a copy of the wigner function
         gpuarray._memcpy_discontig(self.rho, self.wignerfunction)
 
         ####################################################################################
@@ -434,8 +437,8 @@ class WignerMoyalCUDA1D:
         ####################################################################################
         # """
         self.sign_flip(self.rho, **self.rho_mapper_params)
+
         cufft.fft_Z2Z(self.rho, self.rho, self.plan_Z2Z_ax0)
-        self.sign_flip(self.rho, **self.rho_mapper_params)
 
         ####################################################################################
         #
@@ -461,6 +464,8 @@ class WignerMoyalCUDA1D:
         self.phase_shearX(self.rho, **self.rho_mapper_params)
         cufft.fft_Z2Z(self.rho, self.rho, self.plan_Z2Z_ax1)
 
+        self.sign_flip(self.rho, **self.rho_mapper_params)
+
         return self.rho
 
     def rho2wigner_(self):
@@ -471,6 +476,7 @@ class WignerMoyalCUDA1D:
         # Make a copy of the density matrix
         gpuarray._memcpy_discontig(self.wignerfunction, self.rho)
 
+        self.sign_flip(self.wignerfunction, **self.wigner_mapper_params)
         # Step 1: Rotate by +45 degrees
         # Shear X
         cufft.fft_Z2Z(self.wignerfunction, self.wignerfunction, self.plan_Z2Z_ax1)
@@ -488,8 +494,8 @@ class WignerMoyalCUDA1D:
         cufft.ifft_Z2Z(self.wignerfunction, self.wignerfunction, self.plan_Z2Z_ax1)
 
         # Step 2: FFt the Blokhintsev function
-        self.sign_flip(self.wignerfunction, **self.wigner_mapper_params)
         cufft.ifft_Z2Z(self.wignerfunction, self.wignerfunction, self.plan_Z2Z_ax0)
+
         self.sign_flip(self.wignerfunction, **self.wigner_mapper_params)
 
         return self.wignerfunction
@@ -502,6 +508,8 @@ class WignerMoyalCUDA1D:
         # Make a copy of the density matrix
         gpuarray._memcpy_discontig(self.wignerfunction, self.rho)
 
+        self.sign_flip(self.wignerfunction, **self.wigner_mapper_params)
+
         # Step 1: Rotate by +45 degrees
         # Shear X
         self.blackmanX(self.wignerfunction, **self.wigner_mapper_params)
@@ -523,8 +531,8 @@ class WignerMoyalCUDA1D:
 
         # Step 2: FFt the Blokhintsev function
         self.blackmanY(self.wignerfunction, **self.wigner_mapper_params)
-        self.sign_flip(self.wignerfunction, **self.wigner_mapper_params)
         cufft.ifft_Z2Z(self.wignerfunction, self.wignerfunction, self.plan_Z2Z_ax0)
+
         self.sign_flip(self.wignerfunction, **self.wigner_mapper_params)
 
         return self.wignerfunction
@@ -634,7 +642,7 @@ class WignerMoyalCUDA1D:
         const size_t j = threadIdx.x + blockDim.x * blockIdx.x;
         const size_t indexTotal = j + i * X_gridDIM;
 
-        const double PP = dPP * ((j + X_gridDIM / 2) % X_gridDIM - 0.5 * X_gridDIM);
+        const double PP = dPP * (j - 0.5 * X_gridDIM);
         const double XX_prime = dXX_prime * (i - 0.5 * P_gridDIM);
 
         // perform rotation by theta: const double a = tan(0.5 * theta);
@@ -652,7 +660,7 @@ class WignerMoyalCUDA1D:
         const size_t indexTotal = j + i * X_gridDIM;
 
         const double XX = dXX * (j - 0.5 * X_gridDIM);
-        const double PP_prime = dPP_prime * ((i + P_gridDIM / 2) % P_gridDIM - 0.5 * P_gridDIM);
+        const double PP_prime = dPP_prime * (i - 0.5 * P_gridDIM);
 
         // perform rotation by theta: const double b = -sin(theta);
         const double b = -sin(M_PI / 4.);
@@ -702,8 +710,8 @@ class WignerMoyalCUDA1D:
         const size_t j = threadIdx.x + blockDim.x * blockIdx.x;
         const size_t indexTotal = j + i * X_gridDIM;
 
-        // rho *= pow(-1, i)
-        rho[indexTotal] *= 1 - 2 * int(i % 2);
+        // rho *= pow(-1, i + j)
+        rho[indexTotal] *= 1 - 2 * int((i + j) % 2);
     }}
 
     ////////////////////////////////////////////////////////////////////////////
@@ -737,9 +745,8 @@ class WignerMoyalCUDA1D:
         const size_t j = threadIdx.x + blockDim.x * blockIdx.x;
         const size_t indexTotal = j + i * X_gridDIM;
 
-        // fft shifting momentum
-        const double PP = dPP * ((j + X_gridDIM / 2) % X_gridDIM - 0.5 * X_gridDIM);
-        const double PP_prime = dPP_prime * ((i + P_gridDIM / 2) % P_gridDIM - 0.5 * P_gridDIM);
+        const double PP = dPP * (j - 0.5 * X_gridDIM);
+        const double PP_prime = dPP_prime * (i - 0.5 * P_gridDIM);
 
         const double phase = -dt * (K(PP, t + 0.5 * dt) - K(PP_prime, t + 0.5 * dt));
 
@@ -764,7 +771,10 @@ class WignerMoyalCUDA1D:
 
         const double phase = -0.5 * dt * (V(XX, t + 0.5 * dt) - V(XX_prime, t + 0.5 * dt));
 
-        rho[indexTotal] *= cuda_complex(cos(phase), sin(phase)) * ({abs_boundary_x});
+        // sign_flip = pow(-1, i + j)
+        const double sign_flip = 1. - 2. * int((i + j) % 2);
+
+        rho[indexTotal] *= sign_flip * cuda_complex(cos(phase), sin(phase)) * ({abs_boundary_x});
     }}
     """
 
@@ -940,7 +950,9 @@ if __name__ == '__main__':
             :return: image objects
             """
             # propagate the wigner function
-            self.img.set_array(self.quant_sys.propagate(50).get().real)
+            self.img.set_array(
+                self.quant_sys.propagate(50).get().real
+            )
 
             return self.img,
 
