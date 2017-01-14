@@ -529,7 +529,7 @@ class WignerMoyalCUDA1D:
         self.phase_shearX(self.wignerfunction, **self.wigner_mapper_params)
         cufft.ifft_Z2Z(self.wignerfunction, self.wignerfunction, self.plan_Z2Z_ax1)
 
-        # Step 2: FFt the Blokhintsev function
+        # Step 2: FFT the Blokhintsev function
         self.blackmanY(self.wignerfunction, **self.wigner_mapper_params)
         cufft.ifft_Z2Z(self.wignerfunction, self.wignerfunction, self.plan_Z2Z_ax0)
 
@@ -547,12 +547,12 @@ class WignerMoyalCUDA1D:
         """
         self.expV(self.rho, self.t, **self.rho_mapper_params)
 
-        cufft.fft_Z2Z(self.rho, self.rho, self.plan_Z2Z_ax0)
+        cufft.ifft_Z2Z(self.rho, self.rho, self.plan_Z2Z_ax0)
         cufft.fft_Z2Z(self.rho, self.rho, self.plan_Z2Z_ax1)
 
         self.expK(self.rho, self.t, **self.rho_mapper_params)
 
-        cufft.ifft_Z2Z(self.rho, self.rho, self.plan_Z2Z_ax0)
+        cufft.fft_Z2Z(self.rho, self.rho, self.plan_Z2Z_ax0)
         cufft.ifft_Z2Z(self.rho, self.rho, self.plan_Z2Z_ax1)
         self.rho /= self.rho.shape[0] * self.rho.shape[1]
 
@@ -699,8 +699,8 @@ class WignerMoyalCUDA1D:
 
     ////////////////////////////////////////////////////////////////////////////
     //
-    // CUDA code to multiply with (-1)^i in order for FFT
-    // to approximate the Fourier integral over theta
+    // CUDA code to multiply with (-1)^(i + i) in order for FFT
+    // to approximate the 2D Fourier integral
     //
     ////////////////////////////////////////////////////////////////////////////
 

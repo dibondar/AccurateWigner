@@ -106,7 +106,8 @@ class RhoVNeumannCUDA1D:
         self.X = np.linspace(-self.X_amplitude, self.X_amplitude - self.dX, self.X_gridDIM)
 
         # momentum grid
-        self.P = np.fft.fftshift(np.fft.fftfreq(self.X.size, self.dX / (2. * np.pi)))
+        self.P = np.arange(self.X_gridDIM, dtype=np.float) - self.X_gridDIM / 2
+        self.P *= 2. * np.pi / (self.X_gridDIM * self.dX)
         self.dP = self.P[1] - self.P[0]
 
         # Padding for Wigner function (from one-side)
@@ -116,17 +117,21 @@ class RhoVNeumannCUDA1D:
         #   self.wigner_padding = int(np.ceil(0.5 * (np.sqrt(2.) - 1.) * self.X.size))
         #
         #   However, it is advisible to use for the efficiency of FFT
+
         self.wigner_padding = self.X.size // 2
 
         # number of points for Wigner function
         self.XX_gridDIM = self.X.size + 2 * self.wigner_padding
 
         # X Wigner grid
-        self.X_wigner = self.dX / np.sqrt(2.) * (np.arange(self.XX_gridDIM) - self.XX_gridDIM // 2)
+        self.X_wigner = np.arange(self.XX_gridDIM, dtype=np.float) - self.XX_gridDIM / 2
+        self.X_wigner *= self.dX / np.sqrt(2.)
         self.dX_wigner = self.X_wigner[1] - self.X_wigner[0]
 
         # P Wigner grid
-        PP = np.fft.fftshift(np.fft.fftfreq(self.XX_gridDIM, self.dX / (2. * np.pi)))
+        PP = np.arange(self.XX_gridDIM, dtype=np.float) - self.XX_gridDIM / 2
+        PP *= 2. * np.pi / (self.XX_gridDIM * self.dX)
+
         self.dPP = PP[1] - PP[0]
 
         self.P_wigner = PP / np.sqrt(2.)
@@ -208,7 +213,10 @@ class RhoVNeumannCUDA1D:
         self.plan_wigner_ax0 = cufft.Plan_Z2Z_2D_Axis0(self.wignerfunction.shape)
         self.plan_wigner_ax1 = cufft.Plan_Z2Z_2D_Axis1(self.wignerfunction.shape)
 
-        self.plan_rho_2D = cufft.PlanZ2Z(self.rho.shape)
+        #self.plan_rho_2D = cufft.PlanZ2Z(self.rho.shape)
+
+        self.plan_Z2Z_ax0 = cufft.Plan_Z2Z_2D_Axis0(self.rho.shape)
+        self.plan_Z2Z_ax1 = cufft.Plan_Z2Z_2D_Axis1(self.rho.shape)
 
         ##########################################################################################
         #
@@ -226,7 +234,7 @@ class RhoVNeumannCUDA1D:
         # If the X grid size is smaller or equal to the max number of CUDA threads
         # then use all self.X_gridDIM processors
         # otherwise number of processor to be used is the greatest common divisor of these two attributes
-        size_x = self.X.size
+        size_x = self.X_gridDIM
         nproc = (size_x if size_x <= self.max_thread_block else gcd(size_x, self.max_thread_block))
 
         # CUDA block and grid for functions that act on the whole denisty matrix
@@ -268,7 +276,9 @@ class RhoVNeumannCUDA1D:
 
         self.phase_shearX = wigner_cuda_compiled.get_function("phase_shearX")
         self.phase_shearY = wigner_cuda_compiled.get_function("phase_shearY")
-        self.sign_flip = wigner_cuda_compiled.get_function("sign_flip")
+
+        self.sign_flip_rho = wigner_cuda_compiled.get_function("sign_flip_rho")
+        self.sign_flip_wigner = wigner_cuda_compiled.get_function("sign_flip_wigner")
 
         self.expV = wigner_cuda_compiled.get_function("expV")
         self.expK = wigner_cuda_compiled.get_function("expK")
@@ -288,10 +298,6 @@ class RhoVNeumannCUDA1D:
 
         # hash table of cuda compiled functions that calculate an average of specified observable
         self._compiled_observable = dict()
-
-        # Create the plan for FFT/iFFT
-        self.plan_Z2Z_ax0 = cufft.Plan_Z2Z_2D_Axis0(self.rho.shape)
-        self.plan_Z2Z_ax1 = cufft.Plan_Z2Z_2D_Axis1(self.rho.shape)
 
         ##########################################################################################
         #
@@ -379,7 +385,7 @@ class RhoVNeumannCUDA1D:
         return self
 
     def get_wignerfunction(self):
-        """
+        """"
         Transform the density matrix saved in self.rho into the unormalized Wigner function
         :return: self.wignerfunction
         """
@@ -391,15 +397,10 @@ class RhoVNeumannCUDA1D:
             self.wigner_padding:(self.wigner_padding + self.X_gridDIM)
         ] = self.rho
 
-        ####################################################################################
-        #
-        # Step 1: Perform the 45 degree rotation of the density matrix
-        # using method from
-        #   K. G. Larkin,  M. A. Oldfield, H. Klemm, Optics Communications, 139, 99 (1997)
-        #   (http://www.sciencedirect.com/science/article/pii/S0030401897000977)
-        #
-        ####################################################################################
+        # Start the Wigner transform
+        self.sign_flip_wigner(self.wignerfunction, **self.wigner_mapper_params)
 
+        # Step 1: Rotate by +45 degrees
         # Shear X
         cufft.fft_Z2Z(self.wignerfunction, self.wignerfunction, self.plan_wigner_ax1)
         self.phase_shearX(self.wignerfunction, **self.wigner_mapper_params)
@@ -415,18 +416,12 @@ class RhoVNeumannCUDA1D:
         self.phase_shearX(self.wignerfunction, **self.wigner_mapper_params)
         cufft.ifft_Z2Z(self.wignerfunction, self.wignerfunction, self.plan_wigner_ax1)
 
-        ####################################################################################
-        #
-        # Step 2: Perform the FFT over the Blokhintsev function using method from
-        #
-        #   D. H. Bailey and P. N. Swarztrauber, SIAM J. Sci. Comput. 15, 1105 (1994)
-        #   (http://epubs.siam.org/doi/abs/10.1137/0915067)
-        #
-        ####################################################################################
-        self.sign_flip(self.wignerfunction, **self.wigner_mapper_params)
+        # Step 2: FFt the Blokhintsev function
         cufft.ifft_Z2Z(self.wignerfunction, self.wignerfunction, self.plan_wigner_ax0)
-        self.sign_flip(self.wignerfunction, **self.wigner_mapper_params)
 
+        self.sign_flip_wigner(self.wignerfunction, **self.wigner_mapper_params)
+
+        # Normalize
         self.wignerfunction /= gpuarray.sum(self.wignerfunction).get().real * self.dXdP_wigner
 
         return self.wignerfunction
@@ -459,11 +454,13 @@ class RhoVNeumannCUDA1D:
         """
         self.expV(self.rho, self.t, **self.rho_mapper_params)
 
-        cufft.fft_Z2Z(self.rho, self.rho, self.plan_rho_2D)
+        cufft.fft_Z2Z(self.rho, self.rho, self.plan_Z2Z_ax0)
+        cufft.ifft_Z2Z(self.rho, self.rho, self.plan_Z2Z_ax1)
 
         self.expK(self.rho, self.t, **self.rho_mapper_params)
 
-        cufft.ifft_Z2Z(self.rho, self.rho, self.plan_rho_2D)
+        cufft.ifft_Z2Z(self.rho, self.rho, self.plan_Z2Z_ax0)
+        cufft.fft_Z2Z(self.rho, self.rho, self.plan_Z2Z_ax1)
         #self.rho /= self.rho.shape[0] * self.rho.shape[1]
 
         self.expV(self.rho, self.t, **self.rho_mapper_params)
@@ -549,7 +546,8 @@ class RhoVNeumannCUDA1D:
                     self.get_observable(obs_str)(self._tmp, self.t, **self.rho_mapper_params)
                 else:
                     # Going to the momentum representation
-                    cufft.fft_Z2Z(self._tmp, self._tmp, self.plan_Z2Z_ax1)
+                    self.sign_flip_rho(self._tmp, **self.rho_mapper_params)
+                    cufft.ifft_Z2Z(self._tmp, self._tmp, self.plan_Z2Z_ax1)
 
                     # Normalize
                     self._tmp /= self._tmp.shape[1]
@@ -558,7 +556,8 @@ class RhoVNeumannCUDA1D:
                     self.get_observable(obs_str)(self._tmp, self.t, **self.rho_mapper_params)
 
                     # Going back to the coordinate representation
-                    cufft.ifft_Z2Z(self._tmp, self._tmp, self.plan_Z2Z_ax1)
+                    cufft.fft_Z2Z(self._tmp, self._tmp, self.plan_Z2Z_ax1)
+                    self.sign_flip_rho(self._tmp, **self.rho_mapper_params)
 
         return cu_linalg.trace(self._tmp).real * self.dX
 
@@ -611,7 +610,7 @@ class RhoVNeumannCUDA1D:
         const size_t j = threadIdx.x + blockDim.x * blockIdx.x;
         const size_t indexTotal = j + i * XX_gridDIM;
 
-        const double PP = dPP * ((j + XX_gridDIM / 2) % XX_gridDIM - 0.5 * XX_gridDIM);
+        const double PP = dPP * (j - 0.5 * XX_gridDIM);
         const double XX_prime = dXX * (i - 0.5 * XX_gridDIM);
 
         // perform rotation by theta: const double a = tan(0.5 * theta);
@@ -629,7 +628,7 @@ class RhoVNeumannCUDA1D:
         const size_t indexTotal = j + i * XX_gridDIM;
 
         const double XX = dXX * (j - 0.5 * XX_gridDIM);
-        const double PP_prime = dPP * ((i + XX_gridDIM / 2) % XX_gridDIM - 0.5 * XX_gridDIM);
+        const double PP_prime = dPP * (i - 0.5 * XX_gridDIM);
 
         // perform rotation by theta: const double b = -sin(theta);
         const double b = -sin(M_PI / 4.);
@@ -668,19 +667,29 @@ class RhoVNeumannCUDA1D:
 
     ////////////////////////////////////////////////////////////////////////////
     //
-    // CUDA code to multiply with (-1)^i in order for FFT
-    // to approximate the Fourier integral over theta
+    // CUDA code to multiply with (-1)^(i + i) in order for FFT
+    // to approximate the 2D Fourier integral
     //
     ////////////////////////////////////////////////////////////////////////////
 
-    __global__ void sign_flip(cuda_complex *rho)
+    __global__ void sign_flip_rho(cuda_complex *rho)
+    {{
+        const size_t i = blockIdx.y;
+        const size_t j = threadIdx.x + blockDim.x * blockIdx.x;
+        const size_t indexTotal = j + i * X_gridDIM;
+
+        // rho *= pow(-1, i + j)
+        rho[indexTotal] *= 1 - 2 * int((i + j) % 2);
+    }}
+
+    __global__ void sign_flip_wigner(cuda_complex *W)
     {{
         const size_t i = blockIdx.y;
         const size_t j = threadIdx.x + blockDim.x * blockIdx.x;
         const size_t indexTotal = j + i * XX_gridDIM;
 
-        // rho *= pow(-1, i)
-        rho[indexTotal] *= 1 - 2 * int(i % 2);
+        // W *= pow(-1, i + j)
+        W[indexTotal] *= 1 - 2 * int((i + j) % 2);
     }}
 
     ////////////////////////////////////////////////////////////////////////////
@@ -727,8 +736,8 @@ class RhoVNeumannCUDA1D:
         const size_t indexTotal = j + i * X_gridDIM;
 
         // fft shifting momentum
-        const double P = dP * ((j + X_gridDIM / 2) % X_gridDIM - 0.5 * X_gridDIM);
-        const double P_prime = dP * ((i + X_gridDIM / 2) % X_gridDIM - 0.5 * X_gridDIM);
+        const double P = dP * (j - 0.5 * X_gridDIM);
+        const double P_prime = dP * (i - 0.5 * X_gridDIM);
 
         const double phase = -dt * (K(P, t + 0.5 * dt) - K(P_prime, t + 0.5 * dt));
 
@@ -753,7 +762,11 @@ class RhoVNeumannCUDA1D:
 
         const double phase = -0.5 * dt * (V(X, t + 0.5 * dt) - V(X_prime, t + 0.5 * dt));
 
-        rho[indexTotal] *= cuda_complex(cos(phase), sin(phase)) * abs_boundary_x(X) * abs_boundary_x(X_prime);
+        // sign_flip = pow(-1, i + j)
+        const double sign_flip = 1. - 2. * int((i + j) % 2);
+
+        rho[indexTotal] *= sign_flip * cuda_complex(cos(phase), sin(phase))
+                            * abs_boundary_x(X) * abs_boundary_x(X_prime);
     }}
     """
 
@@ -801,7 +814,7 @@ class RhoVNeumannCUDA1D:
         const size_t j = threadIdx.x + blockDim.x * blockIdx.x;
         const size_t indexTotal = j + i * X_gridDIM;
 
-        const double P = dP * ((j + X_gridDIM / 2) % X_gridDIM - 0.5 * X_gridDIM);
+        const double P = dP * (j - 0.5 * X_gridDIM);
         const double X = dX * (j - 0.5 * X_gridDIM);
 
         rho[indexTotal] *= ({observable});
@@ -829,6 +842,8 @@ if __name__ == '__main__':
     import matplotlib.animation
     import matplotlib.pyplot as plt
 
+
+    np.random.seed(1895230646290)
 
     class VisualizeDynamicsPhaseSpace:
         """
@@ -952,7 +967,7 @@ if __name__ == '__main__':
             :return: image objects
             """
             # propagate the wave function and then get the Wigner function
-            W = self.quant_sys.propagate(10).get_wignerfunction().get()
+            W = self.quant_sys.propagate(50).get_wignerfunction().get()
 
             self.img.set_array(W.real)
 
