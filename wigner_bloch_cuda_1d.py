@@ -227,12 +227,12 @@ class WignerBlochCUDA1D(WignerMoyalCUDA1D):
         """
         self.bloch_expV(self.rho, dbeta, **self.rho_mapper_params)
 
-        cufft.fft_Z2Z(self.rho, self.rho, self.plan_Z2Z_ax0)
+        cufft.ifft_Z2Z(self.rho, self.rho, self.plan_Z2Z_ax0)
         cufft.fft_Z2Z(self.rho, self.rho, self.plan_Z2Z_ax1)
 
         self.bloch_expK(self.rho, dbeta, **self.rho_mapper_params)
 
-        cufft.ifft_Z2Z(self.rho, self.rho, self.plan_Z2Z_ax0)
+        cufft.fft_Z2Z(self.rho, self.rho, self.plan_Z2Z_ax0)
         cufft.ifft_Z2Z(self.rho, self.rho, self.plan_Z2Z_ax1)
 
         self.bloch_expV(self.rho, dbeta, **self.rho_mapper_params)

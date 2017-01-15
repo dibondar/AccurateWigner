@@ -230,9 +230,13 @@ class RhoBlochCUDA1D(RhoVNeumannCUDA1D):
         """
         self.bloch_expV(self.rho, dbeta, **self.rho_mapper_params)
 
-        cufft.fft_Z2Z(self.rho, self.rho, self.plan_rho_2D)
+        cufft.ifft_Z2Z(self.rho, self.rho, self.plan_Z2Z_ax0)
+        cufft.fft_Z2Z(self.rho, self.rho, self.plan_Z2Z_ax1)
+
         self.bloch_expK(self.rho, dbeta, **self.rho_mapper_params)
-        cufft.ifft_Z2Z(self.rho, self.rho, self.plan_rho_2D)
+
+        cufft.fft_Z2Z(self.rho, self.rho, self.plan_Z2Z_ax0)
+        cufft.ifft_Z2Z(self.rho, self.rho, self.plan_Z2Z_ax1)
 
         self.bloch_expV(self.rho, dbeta, **self.rho_mapper_params)
 
@@ -276,8 +280,8 @@ class RhoBlochCUDA1D(RhoVNeumannCUDA1D):
         const size_t indexTotal = j + i * X_gridDIM;
 
         // fft shifting momentum
-        const double P = dP * ((j + X_gridDIM / 2) % X_gridDIM - 0.5 * X_gridDIM);
-        const double P_prime = dP * ((i + X_gridDIM / 2) % X_gridDIM - 0.5 * X_gridDIM);
+        const double P = dP * (j - 0.5 * X_gridDIM);
+        const double P_prime = dP * (i - 0.5 * X_gridDIM);
 
         const double phase = -0.5 * dbeta * (
             K(P, t_initial) + K(P_prime, t_initial) - K_min
@@ -306,7 +310,10 @@ class RhoBlochCUDA1D(RhoVNeumannCUDA1D):
             V(X, t_initial) + V(X_prime, t_initial) - V_min
         );
 
-        rho[indexTotal] *= exp(phase);
+        // sign_flip = pow(-1, i + j)
+        const double sign_flip = 1. - 2. * int((i + j) % 2);
+
+        rho[indexTotal] *= sign_flip * exp(phase);
     }}
     """
 
@@ -359,8 +366,8 @@ class RhoBlochCUDA1D(RhoVNeumannCUDA1D):
         const size_t indexTotal = j + i * X_gridDIM;
 
         // fft shifting momentum
-        const double P = dP * ((j + X_gridDIM / 2) % X_gridDIM - 0.5 * X_gridDIM);
-        const double P_prime = dP * ((i + X_gridDIM / 2) % X_gridDIM - 0.5 * X_gridDIM);
+        const double P = dP * (j - 0.5 * X_gridDIM);
+        const double P_prime = dP * (i - 0.5 * X_gridDIM);
 
         Z[indexTotal] *= K(P, t_initial) + K(P_prime, t_initial);
     }}

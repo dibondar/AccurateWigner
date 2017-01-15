@@ -213,8 +213,6 @@ class RhoVNeumannCUDA1D:
         self.plan_wigner_ax0 = cufft.Plan_Z2Z_2D_Axis0(self.wignerfunction.shape)
         self.plan_wigner_ax1 = cufft.Plan_Z2Z_2D_Axis1(self.wignerfunction.shape)
 
-        #self.plan_rho_2D = cufft.PlanZ2Z(self.rho.shape)
-
         self.plan_Z2Z_ax0 = cufft.Plan_Z2Z_2D_Axis0(self.rho.shape)
         self.plan_Z2Z_ax1 = cufft.Plan_Z2Z_2D_Axis1(self.rho.shape)
 
@@ -454,13 +452,13 @@ class RhoVNeumannCUDA1D:
         """
         self.expV(self.rho, self.t, **self.rho_mapper_params)
 
-        cufft.fft_Z2Z(self.rho, self.rho, self.plan_Z2Z_ax0)
-        cufft.ifft_Z2Z(self.rho, self.rho, self.plan_Z2Z_ax1)
+        cufft.ifft_Z2Z(self.rho, self.rho, self.plan_Z2Z_ax0)
+        cufft.fft_Z2Z(self.rho, self.rho, self.plan_Z2Z_ax1)
 
         self.expK(self.rho, self.t, **self.rho_mapper_params)
 
-        cufft.ifft_Z2Z(self.rho, self.rho, self.plan_Z2Z_ax0)
-        cufft.fft_Z2Z(self.rho, self.rho, self.plan_Z2Z_ax1)
+        cufft.fft_Z2Z(self.rho, self.rho, self.plan_Z2Z_ax0)
+        cufft.ifft_Z2Z(self.rho, self.rho, self.plan_Z2Z_ax1)
         #self.rho /= self.rho.shape[0] * self.rho.shape[1]
 
         self.expV(self.rho, self.t, **self.rho_mapper_params)
@@ -474,6 +472,7 @@ class RhoVNeumannCUDA1D:
         :return: coordinate and momentum densities, if the Ehrenfest theorems were calculated; otherwise, return None
         """
         if self.isEhrenfest:
+
             # save the current value of <X>
             self.X_average.append(
                 self.get_average(("X",))
@@ -511,7 +510,7 @@ class RhoVNeumannCUDA1D:
         except KeyError:
             print("\n============================== Compiling [%s] ==============================\n" % observable_str)
             func = self._compiled_observable[observable_str] = SourceModule(
-                self.apply_observable_cuda_source.format(cuda_consts=self.cuda_consts, observable=observable_str),
+                self.apply_observable_rho_cuda_source.format(cuda_consts=self.cuda_consts, observable=observable_str),
             ).get_function("Kernel")
 
         return func
@@ -522,10 +521,10 @@ class RhoVNeumannCUDA1D:
             observable = (coordinate obs, momentum obs, coordinate obs, momentum obs, ...)
 
         Example 1:
-            To calculate Tr[rho F1(x) g1(p) F2(X)], we use observable = ("F1(x)", "g1(p)", "F2(X)")
+            To calculate Tr[F2(X) g1(p) F1(x) rho], we use observable = ("F1(x)", "g1(p)", "F2(X)")
 
         Example 2:
-            To calculate Tr[rho g(p) F(X)], we use observable = (None, "g(p)", "F(X)")
+            To calculate Tr[F(X) g(p) rho], we use observable = (None, "g(p)", "F(X)")
 
         :param observable: tuple of strings
         :return: float
@@ -547,7 +546,7 @@ class RhoVNeumannCUDA1D:
                 else:
                     # Going to the momentum representation
                     self.sign_flip_rho(self._tmp, **self.rho_mapper_params)
-                    cufft.ifft_Z2Z(self._tmp, self._tmp, self.plan_Z2Z_ax1)
+                    cufft.fft_Z2Z(self._tmp, self._tmp, self.plan_Z2Z_ax1)
 
                     # Normalize
                     self._tmp /= self._tmp.shape[1]
@@ -556,7 +555,7 @@ class RhoVNeumannCUDA1D:
                     self.get_observable(obs_str)(self._tmp, self.t, **self.rho_mapper_params)
 
                     # Going back to the coordinate representation
-                    cufft.fft_Z2Z(self._tmp, self._tmp, self.plan_Z2Z_ax1)
+                    cufft.ifft_Z2Z(self._tmp, self._tmp, self.plan_Z2Z_ax1)
                     self.sign_flip_rho(self._tmp, **self.rho_mapper_params)
 
         return cu_linalg.trace(self._tmp).real * self.dX
@@ -793,7 +792,7 @@ class RhoVNeumannCUDA1D:
     }}
     """
 
-    apply_observable_cuda_source = """
+    apply_observable_rho_cuda_source = """
     #include<pycuda-complex.hpp>
     #include<math.h>
     #define _USE_MATH_DEFINES
@@ -820,6 +819,32 @@ class RhoVNeumannCUDA1D:
         rho[indexTotal] *= ({observable});
     }}
     """
+
+    # apply_observable_wigner_cuda_source = """
+    # // CUDA code to calculate
+    # //      weighted = W(X, P, t) * func(X, P, t).
+    # // This is used in self.get_average
+    # // weighted.sum()*dXdP_wigner is the average of func(X, P, t) over the Wigner function
+    # #include<pycuda-complex.hpp>
+    # #include<math.h>
+    # #define _USE_MATH_DEFINES
+    #
+    # typedef pycuda::complex<double> cuda_complex;
+    #
+    # {cuda_consts}
+    #
+    # __global__ void Kernel(const cuda_complex *W, double *weighted, double t)
+    # {{
+    #     const size_t i = blockIdx.y;
+    #     const size_t j = threadIdx.x + blockDim.x * blockIdx.x;
+    #     const size_t indexTotal = j + i * XX_gridDIM;
+    #
+    #     const double X = dX_wigner * (j - 0.5 * XX_gridDIM);
+    #     const double P = dP_wigner * (i - 0.5 * XX_gridDIM);
+    #
+    #     weighted[indexTotal] = W[indexTotal].real() * ({func});
+    # }}
+    # """
 
 ##########################################################################################
 #
@@ -919,7 +944,7 @@ if __name__ == '__main__':
             # Create propagator
             self.quant_sys = RhoVNeumannCUDA1D(
                 t=0.,
-                dt=0.01,
+                dt=0.005,
 
                 X_gridDIM=1024,
                 X_amplitude=10.,
