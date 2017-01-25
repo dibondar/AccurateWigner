@@ -15,7 +15,14 @@ cu_linalg.init()
 class RhoVNeumannCUDA1D:
     """
     The second-order split-operator propagator for the von Neumann equation for the denisty matrix rho(x,x',t)
-    with the time-dependent Hamiltonian H = K(p, t) + V(x, t) using CUDA.
+    with the time-dependent Hamiltonian H = K(p, t) + V(x, t) assuming the generilized Bloch theorem.
+
+    The generilized Bloch theorem means that the density matrix rho(x, x') can be represented as
+
+        rho(x, x') = exp(1j * (quasimomentum * x - quasimomentum_prime * x')) * f(x, x')
+
+    where f(x, x') is a periodic function with respect to the both arguments.
+    Note that if rho(x, x') represents a pure state than quasimomentum = quasimomentum_prime.
 
     The Wigner function is obtained by padded Wigner transforming the (rectangular) density matrix.
     """
@@ -28,8 +35,13 @@ class RhoVNeumannCUDA1D:
             t (optional) - initial value of time (default t = 0)
             consts (optional) - a string of the C code declaring the constants
             functions (optional) -  a string of the C code declaring auxiliary functions
+
+            quasimomentum and quasimomentum_prime (optional) - real valued parameters entering
+                                the generalized Bloch theorem introduced above.
+
             V - a string of the C code specifying potential energy. Coordinate (X) and time (t) variables are declared.
             K - a string of the C code specifying kinetic energy. Momentum (P) and time (t) variables are declared.
+
             diff_V (optional) - a string of the C code specifying the potential energy derivative w.r.t. X
                                     for the Ehrenfest theorem calculations
             diff_K (optional) - a string of the C code specifying the kinetic energy derivative w.r.t. P
@@ -92,6 +104,22 @@ class RhoVNeumannCUDA1D:
         kwargs.update(t_initial=self.t)
 
         self.t = np.float64(self.t)
+
+        # define quasimomentum
+        try:
+            self.quasimomentum
+
+            try:
+                self.quasimomentum_prime
+            except AttributeError:
+                self.quasimomentum_prime = self.quasimomentum
+                print("Warning: quasimomentum_prime was set to be equal to quasimomentum")
+
+        except AttributeError:
+            self.quasimomentum = self.quasimomentum_prime = 0.
+            print("Warning: Choosing periodic boundary condition: quasimomentum = quasimomentum_prime = 0")
+
+        kwargs.update(quasimomentum=self.quasimomentum, quasimomentum_prime=self.quasimomentum_prime)
 
         ##########################################################################################
         #
@@ -281,6 +309,9 @@ class RhoVNeumannCUDA1D:
         self.expV = wigner_cuda_compiled.get_function("expV")
         self.expK = wigner_cuda_compiled.get_function("expK")
 
+        self.exp_quasiomomentum = wigner_cuda_compiled.get_function("exp_quasiomomentum")
+        self.iexp_quasiomomentum = wigner_cuda_compiled.get_function("iexp_quasiomomentum")
+
         #self.blackmanX = wigner_cuda_compiled.get_function("blackmanX")
         #self.blackmanY = wigner_cuda_compiled.get_function("blackmanY")
 
@@ -430,6 +461,9 @@ class RhoVNeumannCUDA1D:
         :param steps: number of self.dt time increments to make
         :return: self.wignerfunction
         """
+        # Factorize out the quasimomentum
+        self.iexp_quasiomomentum(self.rho, **self.rho_mapper_params)
+
         for _ in xrange(steps):
             # increment current time
             self.t += self.dt
@@ -442,6 +476,12 @@ class RhoVNeumannCUDA1D:
 
             # calculate the Ehrenfest theorems
             self.get_Ehrenfest(self.t)
+
+        # Factorize in the quasimomentum
+        self.exp_quasiomomentum(self.rho, **self.rho_mapper_params)
+
+        # normalize
+        self.rho /= cu_linalg.trace(self.rho).real * self.dX
 
         return self
 
@@ -535,6 +575,9 @@ class RhoVNeumannCUDA1D:
 
         # Make a copy of the density matrix
         gpuarray._memcpy_discontig(self._tmp, self.rho)
+
+        # Factorize in the quasimomentum, which is removed during the propagation
+        self.exp_quasiomomentum(self._tmp, **self.rho_mapper_params)
 
         for obs_str in observable:
             is_x_observable = not is_x_observable
@@ -723,6 +766,46 @@ class RhoVNeumannCUDA1D:
 
     ////////////////////////////////////////////////////////////////////////////
     //
+    // < X | rho | X_prime > *= exp(1j * (quasimomentum * X - quasimomentum_prime * X_prime))
+    //
+    ////////////////////////////////////////////////////////////////////////////
+
+    __global__ void exp_quasiomomentum(cuda_complex *rho)
+    {{
+        const size_t i = blockIdx.y;
+        const size_t j = threadIdx.x + blockDim.x * blockIdx.x;
+        const size_t indexTotal = j + i * X_gridDIM;
+
+        const double X = dX * (j - 0.5 * X_gridDIM);
+        const double X_prime = dX * (i - 0.5 * X_gridDIM);
+
+        const double phase = quasimomentum * X - quasimomentum_prime * X_prime;
+
+        rho[indexTotal] *= cuda_complex(cos(phase), sin(phase));
+    }}
+
+    ////////////////////////////////////////////////////////////////////////////
+    //
+    // < X | rho | X_prime > *= exp(-1j * (quasimomentum * X - quasimomentum_prime * X_prime))
+    //
+    ////////////////////////////////////////////////////////////////////////////
+
+    __global__ void iexp_quasiomomentum(cuda_complex *rho)
+    {{
+        const size_t i = blockIdx.y;
+        const size_t j = threadIdx.x + blockDim.x * blockIdx.x;
+        const size_t indexTotal = j + i * X_gridDIM;
+
+        const double X = dX * (j - 0.5 * X_gridDIM);
+        const double X_prime = dX * (i - 0.5 * X_gridDIM);
+
+        const double phase = quasimomentum * X - quasimomentum_prime * X_prime;
+
+        rho[indexTotal] *= cuda_complex(cos(phase), -sin(phase));
+    }}
+
+    ////////////////////////////////////////////////////////////////////////////
+    //
     // CUDA code to define the action of the kinetic energy exponent
     // onto the density matrix in the momentum representation < P | rho | P_prime >
     //
@@ -734,11 +817,12 @@ class RhoVNeumannCUDA1D:
         const size_t j = threadIdx.x + blockDim.x * blockIdx.x;
         const size_t indexTotal = j + i * X_gridDIM;
 
-        // fft shifting momentum
         const double P = dP * (j - 0.5 * X_gridDIM);
         const double P_prime = dP * (i - 0.5 * X_gridDIM);
 
-        const double phase = -dt * (K(P, t + 0.5 * dt) - K(P_prime, t + 0.5 * dt));
+        const double phase = -dt * (
+            K(P - quasimomentum, t + 0.5 * dt) - K(P_prime - quasimomentum_prime, t + 0.5 * dt)
+        );
 
         rho[indexTotal] *= cuda_complex(cos(phase), sin(phase)) * abs_boundary_p(P) * abs_boundary_p(P_prime);
     }}

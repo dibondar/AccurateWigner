@@ -53,8 +53,8 @@ class RhoBlochCUDA1D(RhoVNeumannCUDA1D):
         RhoVNeumannCUDA1D.__init__(self, **kwargs)
 
         # Save the minimums of the potential (V) and kinetic (K) energy
-        self.cuda_consts += "    const double V_min = %.15e;\n" % self.get_V_min()
-        self.cuda_consts += "    const double K_min = %.15e;\n" % self.get_K_min()
+        self.cuda_consts += "#define V_min %.15e\n" % self.get_V_min()
+        self.cuda_consts += "#define K_min %.15e\n" % self.get_K_min()
 
         print("\n================================ Compiling Bloch expK and expV ================================\n")
 
@@ -228,6 +228,8 @@ class RhoBlochCUDA1D(RhoVNeumannCUDA1D):
         :param dbeta: (float) the inverse temperature step size
         :return: self.rho
         """
+        self.iexp_quasiomomentum(self.rho, **self.rho_mapper_params)
+
         self.bloch_expV(self.rho, dbeta, **self.rho_mapper_params)
 
         cufft.ifft_Z2Z(self.rho, self.rho, self.plan_Z2Z_ax0)
@@ -239,6 +241,8 @@ class RhoBlochCUDA1D(RhoVNeumannCUDA1D):
         cufft.ifft_Z2Z(self.rho, self.rho, self.plan_Z2Z_ax1)
 
         self.bloch_expV(self.rho, dbeta, **self.rho_mapper_params)
+
+        self.exp_quasiomomentum(self.rho, **self.rho_mapper_params)
 
         # normalize
         self.rho /= cu_linalg.trace(self.rho) * self.dX
@@ -284,7 +288,7 @@ class RhoBlochCUDA1D(RhoVNeumannCUDA1D):
         const double P_prime = dP * (i - 0.5 * X_gridDIM);
 
         const double phase = -0.5 * dbeta * (
-            K(P, t_initial) + K(P_prime, t_initial) - K_min
+            K(P - quasimomentum, t_initial) + K(P_prime - quasimomentum_prime, t_initial) - K_min
         );
 
         rho[indexTotal] *= exp(phase);
@@ -369,7 +373,7 @@ class RhoBlochCUDA1D(RhoVNeumannCUDA1D):
         const double P = dP * (j - 0.5 * X_gridDIM);
         const double P_prime = dP * (i - 0.5 * X_gridDIM);
 
-        Z[indexTotal] *= K(P, t_initial) + K(P_prime, t_initial);
+        Z[indexTotal] *= K(P - quasimomentum, t_initial) + K(P_prime - quasimomentum_prime, t_initial);
     }}
     """
 
