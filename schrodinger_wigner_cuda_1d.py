@@ -1,6 +1,9 @@
 import pycuda.gpuarray as gpuarray
 import pycuda.autoinit
 from pycuda.compiler import SourceModule
+from pycuda.reduction import ReductionKernel
+from pycuda.elementwise import ElementwiseKernel
+from pycuda.tools import dtype_to_ctype
 import numpy as np
 from fractions import gcd
 from types import MethodType, FunctionType
@@ -238,7 +241,7 @@ class SchrodingerWignerCUDA1D:
         ##########################################################################################
 
         # Allocate the Wigner function
-        self.wignerfunction = gpuarray.zeros((self.X.size, self.X.size), np.complex128)
+        #self.wignerfunction = gpuarray.zeros((self.X.size, self.X.size), np.complex128)
 
         # Allocate the density matrix
         self.wavefunction = gpuarray.zeros((1, self.X.size), np.complex128)
@@ -249,8 +252,8 @@ class SchrodingerWignerCUDA1D:
         #
         ##########################################################################################
 
-        self.plan_Z2Z_ax0 = cufft.Plan_Z2Z_2D_Axis0(self.wignerfunction.shape)
-        self.plan_Z2Z_ax1 = cufft.Plan_Z2Z_2D_Axis1(self.wignerfunction.shape)
+        #self.plan_Z2Z_ax0 = cufft.Plan_Z2Z_2D_Axis0(self.wignerfunction.shape)
+        #self.plan_Z2Z_ax1 = cufft.Plan_Z2Z_2D_Axis1(self.wignerfunction.shape)
 
         self.plan_Z2Z_psi = cufft.Plan_Z2Z_2D_Axis1(self.wavefunction.shape)
 
@@ -496,6 +499,94 @@ class SchrodingerWignerCUDA1D:
             self.bloch_expV(self.wavefunction, **self.wavefunction_mapper_params)
 
             self.wavefunction /= cu_linalg.norm(self.wavefunction) * np.sqrt(self.dX)
+
+        return self
+
+    def projectout_stationary_states(self, wavefunction):
+        """
+        Project out the stationary states from wavefunction
+        :param wavefunction: provided wavefunction
+        :return: wavefunction
+        """
+        ##########################################################################################
+        #
+        #   Making sure that all the functions are initialized
+        #
+        ##########################################################################################
+        try:
+            self.vdot
+            self.projectout
+        except AttributeError:
+
+            wavefunction_type = dict(wave_type = dtype_to_ctype(self.wavefunction.dtype))
+
+            # set the vdot function (scalar product with complex conjugation)
+            self.vdot = ReductionKernel(
+                self.wavefunction.dtype,
+                neutral="0.".format(**wavefunction_type),
+                reduce_expr="a + b",
+                map_expr="conj(bra[i]) * ket[i]",
+                arguments="const {wave_type} *bra, const {wave_type} *ket".format(**wavefunction_type)
+            )
+
+            self.projectout = ElementwiseKernel(
+                "{wave_type} *psi, const {wave_type} *phi, const {wave_type} C".format(**wavefunction_type),
+                "psi[i] -= C * phi[i]"
+            )
+
+        # normalize
+        wavefunction /= cu_linalg.norm(wavefunction)
+
+        # calculate all projections
+        projs = [self.vdot(psi, wavefunction).get() for psi in self.stationary_states]
+
+        # project out the stationary states
+        for psi, proj in zip(self.stationary_states, projs):
+            self.projectout(wavefunction, psi, proj)
+
+        # normalize
+        wavefunction /= cu_linalg.norm(wavefunction)
+
+        return wavefunction
+
+    def get_stationary_states(self, nstates, nsteps=10000):
+        """
+        Obtain stationary states via the imaginary time propagation
+        :param nstates: number of states to obtaine.
+                if nstates = 1, only the ground state is obtained. if  nstates = 2,
+                the ground and first exited states are obtained.
+        :param nsteps: number of the imaginary time steps to take
+        :return:self
+        """
+        # initialize the list where the stationary states will be saved
+        self.stationary_states = []
+
+        even = True
+
+        for n in xrange(nstates):
+
+            # initialize the wavefunction
+            if even:
+                self.set_wavefunction(1.)
+            else:
+                self.wavefunction[:] = self.X.reshape(self.wavefunction.shape).astype(self.wavefunction.dtype)
+
+            even = not even
+
+            for _ in xrange(nsteps):
+                self.bloch_expV(self.wavefunction, **self.wavefunction_mapper_params)
+
+                cufft.fft_Z2Z(self.wavefunction, self.wavefunction, self.plan_Z2Z_psi)
+                self.bloch_expK(self.wavefunction, **self.wavefunction_mapper_params)
+                cufft.ifft_Z2Z(self.wavefunction, self.wavefunction, self.plan_Z2Z_psi)
+
+                self.bloch_expV(self.wavefunction, **self.wavefunction_mapper_params)
+
+                # project out all previous stationary states
+                self.projectout_stationary_states(self.wavefunction)
+
+            # save obtained approximation to the stationary state
+            self.stationary_states.append(self.wavefunction.copy())
 
         return self
 
