@@ -561,16 +561,16 @@ class SchrodingerWignerCUDA1D:
         # initialize the list where the stationary states will be saved
         self.stationary_states = []
 
+        # bolean flag determining wavefunction's parity
         even = True
 
         for n in xrange(nstates):
 
-            # initialize the wavefunction
+            # initialize the wavefunction dependeding on the parity
             if even:
                 self.set_wavefunction(1.)
             else:
-                self.wavefunction[:] = self.X.reshape(self.wavefunction.shape).astype(self.wavefunction.dtype)
-
+                self.set_wavefunction("atan(X)")
             even = not even
 
             for _ in xrange(nsteps):
