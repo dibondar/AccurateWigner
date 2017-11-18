@@ -1,7 +1,8 @@
-__doc__ = "This file is an example how to use FFTW implementations of phase space dynamics to study" \
-          "strong field physics (ionization due to fs laser pulese)"
+
 
 from schrodinger_wigner_cuda_1d import SchrodingerWignerCUDA1D
+from scipy import fftpack, blackman
+#from test import SchrodingerWignerCUDA1D
 import numpy as np
 
 # load tools for creating animation
@@ -27,29 +28,32 @@ coulomb_sys_params = dict(
     t=0.,
     dt=0.01,
 
-    X_gridDIM=4*1024,
+    X_gridDIM=16 * 2048,
 
     # the lattice constant is 2 * X_amplitude
-    X_amplitude=150.,
+    X_amplitude=2000.,
+
+    #P_amplitude=20.,
 
     # frequency of laser field (800nm)
     omega=0.05698,
 
     # field strength
-    F=0.04,
+    F=0.06,
 
     # ionization potential
     Ip=0.59,
 
     functions="""
     // # The laser field (the field will be on for 8 periods of laser field)
-    __device__ double E(double t)
+    __device__ double E(const double t)
     {{
         return -F * sin(omega * t) * pow(sin(omega * t / 16.), 2);
     }}
     """,
 
-    abs_boundary_x="pow(abs(sin(0.5 * M_PI * (X + X_amplitude) / X_amplitude)), dt * 0.02)",
+    #abs_boundary_x="pow(abs(sin(0.5 * M_PI * (X + X_amplitude) / X_amplitude)), dt * 0.05)",
+    abs_boundary_x="(1. - exp(-50. * abs(X - X_amplitude) / X_amplitude)) * (1. - exp(-50. * abs(X + X_amplitude) / X_amplitude))",
 
     # The same as C code
     E=lambda self, t: -self.F * np.sin(self.omega * t) * np.sin(self.omega * t / 16.)**2,
@@ -89,7 +93,7 @@ short_sys_params.update(
 #
 ##########################################################################################
 
-class VisualizeDynamicsPhaseSpace:
+class VisualizeDynamics:
     """
     Class to visualize dynamics in phase space.
     """
@@ -124,9 +128,6 @@ class VisualizeDynamicsPhaseSpace:
             except TypeError:
                 pass
 
-        self.settings_grp["X_wigner"] = self.coulomb_sys.X_wigner
-        self.settings_grp["P_wigner"] = self.coulomb_sys.P_wigner
-
         # Create group where each frame will be saved
         self.frames_grp = self.file_results.create_group("frames")
 
@@ -136,52 +137,21 @@ class VisualizeDynamicsPhaseSpace:
         #
         #################################################################
 
-        # import utility to visualize the wigner function
-        from wigner_normalize import WignerNormalize, WignerSymLogNorm
-
-        img_params = dict(
-            extent=[
-                self.coulomb_sys.X_wigner.min(), self.coulomb_sys.X_wigner.max(),
-                self.coulomb_sys.P_wigner.min(), self.coulomb_sys.P_wigner.max()
-            ],
-            origin='lower',
-            aspect=2.5,
-            cmap='bwr',
-            # norm=WignerSymLogNorm(linthresh=1e-12, vmin=-0.1, vmax=0.1),
-            # norm=WignerNormalize(vmin=-0.001, vmax=0.001)
-        )
-
         ax = fig.add_subplot(311)
 
-        ax.set_title("The Wigner function for the Coulomb field")
-
-        # generate empty plot for Coulomb field
-        self.coulomb_img = ax.imshow([[]], norm=WignerNormalize(vmin=-0.001, vmax=0.001), **img_params)
-
-        ax.set_xlim([-20, 20])
-        ax.set_ylim([-3, 3])
-
-        self.fig.colorbar(self.coulomb_img)
-
-        # ax.set_xlabel('$x$ (a.u.)')
-        ax.get_xaxis().set_ticks([])
-
-        ax.set_ylabel('$p$ (a.u.)')
+        ax.set_title("Coordinate probability density")
+        self.x_rho_plot, = ax.semilogy([self.coulomb_sys.X.min(), self.coulomb_sys.X.max()], [1e-18, 2e-1])
+        ax.set_ylabel('$\\left|\\Psi(x,t)\\right|^2$ (a.u.)')
+        ax.set_xlabel('$x$ (a.u.)')
 
         ax = fig.add_subplot(312)
 
-        ax.set_title("The Wigner function for the short-range field ")
+        ax.set_title("Momentum probability density")
+        self.p_rho_plot, = ax.semilogy([self.coulomb_sys.P.min(), self.coulomb_sys.P.max()], [1e-18, 1e0])
+        #self.p_rho_plot, = ax.plot([-5, 5], [0., 1.])
 
-        # generate empty plot for short-range field
-        self.shortrange_img = ax.imshow([[]], norm=WignerNormalize(vmin=-0.00005, vmax=0.00005), **img_params)
-
-        ax.set_xlim([-20, 20])
-        ax.set_ylim([-3, 3])
-
-        self.fig.colorbar(self.shortrange_img)
-
-        ax.set_xlabel('$x$ (a.u.)')
-        ax.set_ylabel('$p$ (a.u.)')
+        ax.set_ylabel('$\\left|\\Psi(p,t)\\right|^2$ (a.u.)')
+        ax.set_xlabel('$p$ (a.u.)')
 
         ax = fig.add_subplot(313)
         F = self.coulomb_sys.F
@@ -198,13 +168,36 @@ class VisualizeDynamicsPhaseSpace:
         # Create propagator
         self.coulomb_sys = SchrodingerWignerCUDA1D(**self.coulomb_sys_params)
 
-        print "\nGround state energy for the Coulomb potential %f (a.u.)\n" % \
-              self.coulomb_sys.set_ground_state().get_energy()
+        self.coulomb_sys.get_stationary_states(14)
 
-        self.short_sys = SchrodingerWignerCUDA1D(**self.short_sys_params)
+        self.coulomb_sys.wavefunction[:] = self.coulomb_sys.stationary_states[-1]
 
-        print "\nGround state energy for the short-range potential %f (a.u.) \n" % \
-              self.short_sys.set_ground_state().get_energy()
+        print self.coulomb_sys.get_energy()
+
+        self.coulomb_sys.wavefunction[:] = self.coulomb_sys.stationary_states[0]
+
+        # for psi in self.coulomb_sys.stationary_states:
+        #     rho = psi.get().reshape(-1)
+        #     print rho.min(), rho.max()
+        #     plt.subplot(121)
+        #     plt.plot(rho.real)
+        #     plt.subplot(122)
+        #     plt.plot(rho.imag)
+        #     plt.show()
+
+        self.Ip = -self.coulomb_sys.get_energy()
+
+        print "\nGround state energy for the Coulomb potential %f (a.u.)\n" % (-self.Ip)
+
+        self.E_kinetic = (0.5 * self.coulomb_sys.P ** 2 - self.Ip) / self.coulomb_sys.omega
+
+        #self.ground_state = self.coulomb_sys.wavefunction.get()
+        #self.ground_state /= np.linalg.norm(self.ground_state)
+
+        #self.short_sys = SchrodingerWignerCUDA1D(**self.short_sys_params)
+        self.short_sys = None
+        #print "\nGround state energy for the short-range potential %f (a.u.) \n" % \
+        #      self.short_sys.set_ground_state().get_energy()
 
         # Constant specifying the duration of simulation
 
@@ -212,7 +205,7 @@ class VisualizeDynamicsPhaseSpace:
         self.T_final = 8 * 2 * np.pi / self.coulomb_sys.omega
 
         # Number of steps before plotting
-        self.num_iteration = 100
+        self.num_iteration = 300
 
         # Number of frames
         self.num_frames = int(np.ceil(self.T_final / self.coulomb_sys.dt / self.num_iteration))
@@ -228,10 +221,11 @@ class VisualizeDynamicsPhaseSpace:
         :param self:
         :return: image object
         """
-        self.coulomb_img.set_array([[]])
-        self.shortrange_img.set_array([[]])
+        self.x_rho_plot.set_data([], [])
+        self.p_rho_plot.set_data([], [])
         self.laser_filed_plot.set_data([], [])
-        return self.coulomb_img,  self.shortrange_img, self.laser_filed_plot
+
+        return self.x_rho_plot, self.p_rho_plot, self.laser_filed_plot
 
     def __call__(self, frame_num):
         """
@@ -240,15 +234,34 @@ class VisualizeDynamicsPhaseSpace:
         :return: image objects
         """
         # propagate
+
+        #self.short_sys.propagate(self.num_iteration)
         self.coulomb_sys.propagate(self.num_iteration)
-        self.short_sys.propagate(self.num_iteration)
 
-        # Get the Wigner function
-        wigner = self.coulomb_sys.get_wigner().get().real
-        self.coulomb_img.set_array(wigner)
+        self.x_rho_plot.set_data(
+            self.coulomb_sys.X,
+            np.abs(self.coulomb_sys.wavefunction.get()) ** 2
+        )
 
-        wigner = self.short_sys.get_wigner().get().real
-        self.shortrange_img.set_array(wigner)
+        wavefunction = self.coulomb_sys.projectout_stationary_states(
+            self.coulomb_sys.wavefunction.copy()
+        ).get()
+
+        # Wavefunction in the momentum representation
+        wavefunction *= (-1) ** np.arange(wavefunction.size)
+        wavefunction = fftpack.fft(wavefunction, overwrite_x=True)
+        rho_p = np.abs(wavefunction) ** 2
+        rho_p /= rho_p.max()
+
+        # project out the ground state wave function
+        #wavefunction_p /= np.linalg.norm(wavefunction_p)
+        #wavefunction_p -= self.ground_state_p * np.vdot(self.ground_state_p, wavefunction_p)
+        #wavefunction_p /= np.linalg.norm(wavefunction_p)
+
+        self.p_rho_plot.set_data(
+            self.coulomb_sys.P,
+            rho_p
+        )
 
         # prepare goup where simulations for the current frame will be saved
         # frame_grp = self.frames_grp.create_group(str(self.current_frame_num))
@@ -267,13 +280,15 @@ class VisualizeDynamicsPhaseSpace:
         t = np.array(self.times)
         self.laser_filed_plot.set_data(t, self.coulomb_sys.E(t))
 
-        return self.coulomb_img, self.shortrange_img, self.laser_filed_plot
+        return self.x_rho_plot, self.p_rho_plot, self.laser_filed_plot
 
 with h5py.File('strong_field_physics.hdf5', 'w') as file_results:
-    fig = plt.gcf()
-    visualizer = VisualizeDynamicsPhaseSpace(fig, coulomb_sys_params, short_sys_params, file_results)
+    fig = plt.figure(figsize=(10, 10))
+
+    visualizer = VisualizeDynamics(fig, coulomb_sys_params, short_sys_params, file_results)
+
     animation = matplotlib.animation.FuncAnimation(
-        fig, visualizer, frames=min(881, visualizer.num_frames),
+        fig, visualizer, frames=visualizer.num_frames,
         init_func=visualizer.empty_frame, blit=True, repeat=False
     )
 
@@ -293,38 +308,43 @@ with h5py.File('strong_field_physics.hdf5', 'w') as file_results:
     # Plot the Ehrenfest theorems after the animation is over
     #
     #################################################################
+    # Analyze how well the energy was preserved
+    h = np.array(coulomb_sys.hamiltonian_average)
+    print(
+        "\nHamiltonian is preserved within the accuracy of %f percent" % ((1. - h.min() / h.max()) * 100)
+    )
 
-    # # generate time step grid
-    # dt = coulomb_sys.dt
-    # times = dt * np.arange(len(coulomb_sys.X_average)) + dt
-    #
-    # plt.subplot(131)
-    # plt.title("Ehrenfest 1")
-    # plt.plot(times, np.gradient(coulomb_sys.X_average, dt), 'r-', label='$d\\langle x \\rangle/dt$')
-    # plt.plot(times, coulomb_sys.X_average_RHS, 'b--', label='$\\langle p + \\gamma x \\rangle$')
-    #
-    # plt.legend(loc='upper left')
-    # plt.xlabel('time $t$ (a.u.)')
-    #
-    # plt.subplot(132)
-    # plt.title("Ehrenfest 2")
-    #
-    # plt.plot(times, np.gradient(coulomb_sys.P_average, dt), 'r-', label='$d\\langle p \\rangle/dt$')
-    # plt.plot(
-    #     times, coulomb_sys.P_average_RHS, 'b--',
-    #     label='$\\langle -\\partial V/\\partial x  + \\gamma p \\rangle$'
-    # )
-    #
-    # plt.legend(loc='upper left')
-    # plt.xlabel('time $t$ (a.u.)')
-    #
-    # plt.subplot(133)
-    # plt.title('Hamiltonian')
-    # plt.plot(times, coulomb_sys.hamiltonian_average)
-    # plt.xlabel('time $t$ (a.u.)')
-    #
-    # plt.show()
-    #
+    # generate time step grid
+    dt = coulomb_sys.dt
+    times = dt * np.arange(len(coulomb_sys.X_average)) + dt
+
+    plt.subplot(131)
+    plt.title("Ehrenfest 1")
+    plt.plot(times, np.gradient(coulomb_sys.X_average, dt), 'r-', label='$d\\langle x \\rangle/dt$')
+    plt.plot(times, coulomb_sys.X_average_RHS, 'b--', label='$\\langle p + \\gamma x \\rangle$')
+
+    plt.legend(loc='upper left')
+    plt.xlabel('time $t$ (a.u.)')
+
+    plt.subplot(132)
+    plt.title("Ehrenfest 2")
+
+    plt.plot(times, np.gradient(coulomb_sys.P_average, dt), 'r-', label='$d\\langle p \\rangle/dt$')
+    plt.plot(
+        times, coulomb_sys.P_average_RHS, 'b--',
+        label='$\\langle -\\partial V/\\partial x  + \\gamma p \\rangle$'
+    )
+
+    plt.legend(loc='upper left')
+    plt.xlabel('time $t$ (a.u.)')
+
+    plt.subplot(133)
+    plt.title('Hamiltonian')
+    plt.plot(times, coulomb_sys.hamiltonian_average)
+    plt.xlabel('time $t$ (a.u.)')
+
+    plt.show()
+
     # #################################################################
     # #
     # # Plot HHG spectra as FFT(<P>)
